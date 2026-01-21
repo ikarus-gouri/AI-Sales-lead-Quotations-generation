@@ -67,7 +67,7 @@ class WebCrawler:
         # Check for other common non-page URLs
         skip_patterns = [
             '/feed/', '/rss/', '/wp-json/', '/xmlrpc.php',
-            '/wp-login.php', '/wp-admin/', '/cart/', '/checkout/'
+            '/wp-login.php', '/wp-admin/', '/cart/', '/checkout/', '/location/'
         ]
         for pattern in skip_patterns:
             if pattern in url_lower:
@@ -107,10 +107,10 @@ class WebCrawler:
             should_skip, reason = self._should_skip_url(current_url)
             if should_skip:
                 self.skipped_urls.add(current_url)
-                print(f"  ⏭️  Skipping ({reason}): {current_url}")
+                print(f" Skipping ({reason}): {current_url}")
                 continue
             
-            print(f"🔍 Crawling [{len(self.visited_pages)+1}/{max_pages}] (depth {depth}): {current_url}")
+            print(f"Crawling [{len(self.visited_pages)+1}/{max_pages}] (depth {depth}): {current_url}")
             
             # Scrape the page
             markdown = self.http_client.scrape_with_jina(current_url)
@@ -124,7 +124,7 @@ class WebCrawler:
             # Check if it's a product page
             if self.classifier.is_product_page(current_url, markdown):
                 self.product_pages.add(current_url)
-                print(f"  ✅ PRODUCT PAGE DETECTED: {current_url}")
+                print(f" PRODUCT PAGE DETECTED: {current_url}")
             
             # Extract links for further crawling
             links = self.link_extractor.extract_from_markdown(markdown, current_url)
@@ -142,7 +142,7 @@ class WebCrawler:
                     new_links_count += 1
             
             if new_links_count > 0:
-                print(f"  📎 Found {new_links_count} new links to crawl")
+                print(f"  Found {new_links_count} new links to crawl")
             
             # Be nice to the server
             time.sleep(self.crawl_delay)
@@ -152,7 +152,7 @@ class WebCrawler:
         print(f"{'='*80}")
         print(f"✓ Pages crawled: {len(self.visited_pages)}")
         print(f"✓ Product pages found: {len(self.product_pages)}")
-        print(f"⏭️  URLs skipped (images/media): {len(self.skipped_urls)}")
+        print(f" URLs skipped (images/media): {len(self.skipped_urls)}")
         print(f"{'='*80}\n")
         
         return self.product_pages

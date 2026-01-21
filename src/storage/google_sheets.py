@@ -109,7 +109,8 @@ class GoogleSheetsStorage:
             # Clear existing data
             self.service.spreadsheets().values().clear(
                 spreadsheetId=spreadsheet_id,
-                range=f'{sheet_name}!A:Z'
+                range='Sheet1!A1'
+
             ).execute()
             
             # Upload new data
@@ -119,16 +120,16 @@ class GoogleSheetsStorage:
             
             result = self.service.spreadsheets().values().update(
                 spreadsheetId=spreadsheet_id,
-                range=f'{sheet_name}!A1',
+                range='Sheet1!A1',
                 valueInputOption='RAW',
                 body=body
             ).execute()
             
-            print(f"✓ Uploaded {result.get('updatedCells')} cells to Google Sheets")
+            print(f" Uploaded {result.get('updatedCells')} cells to Google Sheets")
             return True
             
         except HttpError as e:
-            print(f"✗ Failed to upload data: {e}")
+            print(f"Failed to upload data: {e}")
             return False
     
     def format_sheet(self, spreadsheet_id: str, sheet_name: str = 'Product Catalog'):

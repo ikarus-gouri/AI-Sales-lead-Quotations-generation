@@ -71,7 +71,7 @@ class TheraluxeScraper:
         print(f"\n{'─'*80}")
         print(f"Scraping product: {url}")
         print(f"{'─'*80}")
-        
+        time.sleep(15)
         # Scrape the page
         markdown = self.http_client.scrape_with_jina(url)
         

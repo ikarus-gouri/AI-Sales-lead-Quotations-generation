@@ -92,4 +92,4 @@ class CSVStorage:
             writer.writerow(['Categories', 'Component', 'Price', 'References', 'Notes'])
             writer.writerows(rows)
         
-        print(f"✓ Saved {len(rows)} rows to {filepath} (with prices)")
+        print(f" Saved {len(rows)} rows to {filepath} (with prices)")
