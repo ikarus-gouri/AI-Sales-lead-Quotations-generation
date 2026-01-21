@@ -209,3 +209,10 @@ mypy src/
 
 ## Contributing
 
+## Completed Work
+
+- Crawler completed
+- Scraper completed
+- CSV conversion done
+- Integration with Google Sheets done
+
