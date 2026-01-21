@@ -4,12 +4,12 @@ A modular, scalable web scraper for extracting product information and customiza
 
 ## Features
 
-- 🔍 **Intelligent Crawling**: Automatically discovers product pages
-- 🤖 **AI Classification**: Optional AI-powered page classification using Google Gemini
-- 📊 **Comprehensive Extraction**: Extracts product names, prices, and customization options
-- 📁 **Multiple Export Formats**: JSON, CSV, Google Sheets, quotation templates
-- 🏗️ **Modular Architecture**: Easy to extend and maintain
-- 💾 **Flexible Storage**: Multiple output formats with easy expansion
+- **Intelligent Crawling**: Automatically discovers product pages
+- **AI Classification**: Optional AI-powered page classification using Google Gemini
+- **Comprehensive Extraction**: Extracts product names, prices, and customization options
+- **Multiple Export Formats**: JSON, CSV, Google Sheets, quotation templates
+- **Modular Architecture**: Easy to extend and maintain
+- **Flexible Storage**: Multiple output formats with easy expansion
 
 ## Project Structure
 
