@@ -10,7 +10,9 @@ class RuleBasedClassifier(BaseClassifier):
     def __init__(self):
         self.url_indicators = [
             'inquiry', 'enquiry', 'customize', 'builder', 'configurator',
-            'quote', 'quotation', 'build-your', 'design-your'
+            'quote', 'quotation', 'build-your', 'design-your', 'configure-your',
+            'build-a', 'design-a', 'configure-a', 'product-options', 'product-configure',
+            'price', 'options', 'customization', 'select-options', 'choose-options', 'product details'
         ]
         
         self.content_indicators = [

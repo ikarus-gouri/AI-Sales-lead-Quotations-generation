@@ -82,3 +82,5 @@ dmypy.json
 tests/
 data/
 dump/
+meta.txt
+page_diagnostics_output.txt
