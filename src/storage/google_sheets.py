@@ -253,7 +253,7 @@ class GoogleSheetsStorage:
             product_name = product_data['product_name']
             base_price = product_data['base_price'] or 'N/A'
             product_url = product_data['url']
-            
+
             # Product header
             if include_prices:
                 rows.append([
@@ -269,23 +269,32 @@ class GoogleSheetsStorage:
                     product_name,
                     product_url
                 ])
-            
+
             # Customization categories
             for category, options in product_data['customizations'].items():
                 for i, option in enumerate(options):
+                    # Handle both dict and string option types
+                    if isinstance(option, dict):
+                        label = option.get('label', str(option))
+                        price = option.get('price', '')
+                        image = option.get('image', '')
+                    else:
+                        label = str(option)
+                        price = ''
+                        image = ''
                     if include_prices:
                         rows.append([
                             category if i == 0 else '',
-                            option['label'],
-                            option['price'] or '',
-                            option['image'] or '',
+                            label,
+                            price,
+                            image,
                             f"Category: {category}"
                         ])
                     else:
                         rows.append([
                             category if i == 0 else '',
-                            option['label'],
-                            option['image'] or ''
+                            label,
+                            image
                         ])
         
         # Header row

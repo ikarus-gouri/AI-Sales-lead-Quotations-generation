@@ -1,6 +1,6 @@
 # src/crawlers/__init__.py
 """Web crawlers."""
 
-from .web_crawler import  IntelligentWebCrawler
+from .web_crawler import WebCrawler
 
-__all__ = ['IntelligentWebCrawler',]
+__all__ = ['WebCrawler']

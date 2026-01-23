@@ -4,4 +4,5 @@
 from .base_classifier import BaseClassifier
 from .rule_based import RuleBasedClassifier
 from .ai_classifier import AIClassifier
-__all__ = ['BaseClassifier', 'RuleBasedClassifier', 'AIClassifier', ]
+from .url_validator import URLValidationResult, GeminiURLValidator
+__all__ = ['BaseClassifier', 'RuleBasedClassifier', 'AIClassifier', 'URLValidationResult', 'GeminiURLValidator']

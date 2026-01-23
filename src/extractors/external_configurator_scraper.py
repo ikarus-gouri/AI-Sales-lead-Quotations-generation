@@ -65,6 +65,7 @@ class ExternalConfiguratorScraper:
                 time.sleep(delay)
             
             # Scrape the configurator page using Jina
+            time.sleep(10)
             markdown = self.http_client.scrape_with_jina(url)
             
             if not markdown:
