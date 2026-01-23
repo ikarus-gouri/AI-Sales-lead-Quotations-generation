@@ -4,5 +4,5 @@ import argparse
 from .scraper import TheraluxeScraper
 from .config import ScraperConfig
 
-__all__ = ['TheraluxeScraper', 'ScraperConfig']
+__all__ = ['TheraluxeScraper', 'ScraperConfig',]
 
