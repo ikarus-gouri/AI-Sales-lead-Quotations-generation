@@ -7,11 +7,11 @@ from src.storage.json_storage import JSONStorage
 
 
 st.set_page_config(
-    page_title="Theraluxe Product Scraper",
+    page_title="Product Catalog Scraper",
     layout="wide"
 )
 
-st.title("🧖‍♀️ Theraluxe Product Catalog Scraper")
+st.title("Product Catalog Scraper")
 st.markdown("Scrape product catalogs from e-commerce websites.")
 
 # -----------------------------
