@@ -1,48 +1,36 @@
-"""Quotation template generator."""
-
 import json
 from typing import Dict
 
 
 class QuotationTemplate:
-    """Generate quotation templates for sales team."""
-    
+    """Generate quotation template JSON."""
+
     @staticmethod
-    def create(catalog: Dict, filepath: str):
-        """
-        Create a template that sales team can use for quotations.
-        
-        Args:
-            catalog: The product catalog
-            filepath: Where to save the template
-        """
+    def to_json_string(catalog: Dict) -> str:
         template = {
-            "products": {},
-            "instructions": "Use this template to generate quotations. Select options for each category."
+            "instructions": "Select options to generate quotations",
+            "products": {}
         }
-        
-        for product_id, product_data in catalog.items():
+
+        for product_id, product in catalog.items():
             template["products"][product_id] = {
-                "product_name": product_data['product_name'],
-                "base_price": product_data['base_price'],
-                "url": product_data['url'],
+                "product_name": product["product_name"],
+                "base_price": product.get("base_price"),
+                "url": product["url"],
                 "customizations": {}
             }
-            
-            for category, options in product_data['customizations'].items():
+
+            for category, options in product.get("customizations", {}).items():
                 template["products"][product_id]["customizations"][category] = {
                     "options": [
                         {
-                            "label": opt['label'],
-                            "price": opt['price'],
-                            "image": opt['image'],
-                            "selected": False  # Sales team can toggle this
+                            "label": opt["label"],
+                            "price": opt.get("price"),
+                            "image": opt.get("image"),
+                            "selected": False
                         }
                         for opt in options
                     ]
                 }
-        
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(template, f, indent=2, ensure_ascii=False)
-        
-        print(f"✓ Saved quotation template to {filepath}")
+
+        return json.dumps(template, indent=2, ensure_ascii=False)
