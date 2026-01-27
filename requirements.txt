@@ -41,3 +41,5 @@ google-auth-httplib2
 google-api-python-client
 streamlit
 tqdm
+fastapi
+uvicorn
