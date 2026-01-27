@@ -200,9 +200,9 @@ def job_status(job_id: str):
     return JobStatus(**jobs[job_id])
 
 
-@app.get("/jobs")
-def list_jobs():
-    return {"jobs": list(jobs.values())}
+# @app.get("/jobs")
+# def list_jobs():
+#     return {"jobs": list(jobs.values())}
 
 
 @app.get("/download/{job_id}/{format}")

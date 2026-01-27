@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from src.core.config import ScraperConfig
 from src.core.scraper import TheraluxeScraper
 
-app = FastAPI(title="Theraluxe Product Scraper API")
+app = FastAPI(title=" Product Scraper API")
 
 
 # -----------------------------

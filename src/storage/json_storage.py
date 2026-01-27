@@ -1,10 +1,13 @@
+# src/storage/json_storage.py
 import json
-from typing import Dict
-
 
 class JSONStorage:
-    """Save catalog data as JSON (in-memory)."""
+    @staticmethod
+    def to_json_string(data):
+        return json.dumps(data, indent=2)
 
     @staticmethod
-    def to_json_string(catalog: Dict) -> str:
-        return json.dumps(catalog, indent=2, ensure_ascii=False)
+    def save(data, filepath):
+        """Save dictionary as JSON file."""
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
