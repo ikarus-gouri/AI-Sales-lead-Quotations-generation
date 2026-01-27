@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Theraluxe Product Catalog Scraper
 
 A modular, intelligent web scraper designed to crawl e-commerce websites, identify product customization pages, and extract structured product data including prices, options, and images.
@@ -503,3 +504,15 @@ After optimizations, expected improvements:
 - [ ] Add data validation and quality checks
 
 ---
+=======
+---
+title: Catalogue Ai
+emoji: 🏃
+colorFrom: green
+colorTo: indigo
+sdk: docker
+pinned: false
+---
+
+Check out the configuration reference at https://huggingface.co/docs/hub/spaces-config-reference
+>>>>>>> 1730f2b680b0382e1e345fa90adcfed45bf424cf
