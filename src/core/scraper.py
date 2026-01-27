@@ -1,7 +1,7 @@
 """Main scraper orchestrator with dynamic configurator detection."""
 
 import time
-from typing import Dict, Optional, Set
+from typing import Dict, Optional
 from .config import ScraperConfig
 from ..utils.http_client import HTTPClient
 from ..extractors.link_extractor import LinkExtractor
@@ -9,7 +9,6 @@ from ..extractors.product_extractor import ProductExtractor
 from ..extractors.configurator_detector import ConfiguratorDetector
 from ..extractors.external_configurator_scraper import ExternalConfiguratorScraper
 from ..classifiers.rule_based import RuleBasedClassifier
-from ..classifiers.ai_classifier import AIClassifier
 from ..crawlers.web_crawler import WebCrawler
 from ..storage.json_storage import JSONStorage
 from ..storage.csv_storage import CSVStorage
@@ -39,16 +38,8 @@ class TheraluxeScraper:
             product_extractor=self.product_extractor
         )
         
-        # Initialize classifier (AI or rule-based)
-        if config.use_ai_classification and config.gemini_api_key:
-            self.classifier = AIClassifier(
-                api_key=config.gemini_api_key,
-                model_name=config.gemini_model
-            )
-        else:
-            if config.use_ai_classification:
-                print("⚠ Gemini API key not found, using rule-based classification")
-            self.classifier = RuleBasedClassifier()
+        # Initialize rule-based classifier
+        self.classifier = RuleBasedClassifier()
         
         # Initialize crawler
         self.crawler = WebCrawler(
@@ -111,7 +102,7 @@ class TheraluxeScraper:
         if should_scrape:
             print(f"  → Extracting customizations ({reason})...")
             
-            # Strategy 1: External configurator (different domain)
+            # Strategy 1: External configurator
             if configurator_info['configurator_type'] == 'external' and configurator_info['configurator_url']:
                 time.sleep(10)
                 external_result = self.external_scraper.scrape_external_configurator(
@@ -131,7 +122,7 @@ class TheraluxeScraper:
                     customizations = self.product_extractor.extract_customizations(markdown)
                     scrape_source = "product_page_fallback"
             
-            # Strategy 2: Embedded configurator URL (same domain)
+            # Strategy 2: Embedded configurator URL
             elif configurator_info['configurator_url'] and configurator_info['configurator_type'] == 'embedded':
                 print(f"  → Following embedded configurator URL...")
                 time.sleep(self.config.crawl_delay)
@@ -147,7 +138,7 @@ class TheraluxeScraper:
                     customizations = self.product_extractor.extract_customizations(markdown)
                     scrape_source = "product_page_fallback"
             
-            # Strategy 3: Extract from current page (no separate URL)
+            # Strategy 3: Extract from current page
             else:
                 customizations = self.product_extractor.extract_customizations(markdown)
                 scrape_source = "product_page"
@@ -168,7 +159,7 @@ class TheraluxeScraper:
             "configurator_confidence": configurator_info['confidence'],
             "configurator_signals": configurator_info['signals'],
             
-            # External platform info (if applicable)
+            # External platform info
             "external_platform": external_platform,
             
             # Customization data
@@ -195,7 +186,7 @@ class TheraluxeScraper:
             Complete product catalog
         """
         print("\n" + "="*80)
-        print("DYNAMIC PRODUCT CATALOG SCRAPER")
+        print("PRODUCT CATALOG SCRAPER")
         print("="*80)
         
         # Step 1: Crawl and discover product pages
@@ -205,7 +196,7 @@ class TheraluxeScraper:
         )
         
         if not product_urls:
-            print("\n⚠ No product pages found!")
+            print("\n⚠️  No product pages found!")
             return {}
         
         # Step 2: Scrape each product
@@ -254,12 +245,10 @@ class TheraluxeScraper:
                 self.quotation_template.create(catalog, quot_path)
             
             elif fmt == 'google_sheets':
-                # Initialize Google Sheets on demand
                 if self.google_sheets is None:
                     credentials_file = os.getenv('GOOGLE_CREDENTIALS_FILE', 'credentials.json')
                     self.google_sheets = GoogleSheetsStorage(credentials_file)
                 
-                # Check if spreadsheet ID is provided
                 spreadsheet_id = os.getenv('GOOGLE_SPREADSHEET_ID')
                 
                 if self.google_sheets.service:
@@ -271,7 +260,7 @@ class TheraluxeScraper:
     
     def print_summary(self, catalog: Dict):
         """
-        Print comprehensive catalog summary with configurator stats.
+        Print comprehensive catalog summary.
         
         Args:
             catalog: The catalog to summarize
@@ -284,7 +273,6 @@ class TheraluxeScraper:
         total_with_configurator = sum(1 for p in catalog.values() if p['has_configurator'])
         total_embedded = sum(1 for p in catalog.values() if p['configurator_type'] == 'embedded')
         total_external = sum(1 for p in catalog.values() if p['configurator_type'] == 'external')
-        total_none = sum(1 for p in catalog.values() if p['configurator_type'] == 'none')
         total_categories = sum(len(p['customization_categories']) for p in catalog.values())
         total_options = sum(p['total_customization_options'] for p in catalog.values())
         
@@ -293,7 +281,6 @@ class TheraluxeScraper:
         print(f"   Products with Configurator: {total_with_configurator}")
         print(f"     → Embedded: {total_embedded}")
         print(f"     → External: {total_external}")
-        print(f"     → None: {total_none}")
         print(f"   Total Customization Categories: {total_categories}")
         print(f"   Total Customization Options: {total_options}\n")
         

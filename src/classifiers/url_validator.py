@@ -140,20 +140,24 @@ class GeminiURLValidator:
 Website: {base_url}
 
 DEFINITIONS:
-- PRODUCT PAGE: Shows ONE specific product with details, price, specs (e.g., /model-3/, /outdoor-sauna-4-person/)
+- PRODUCT PAGE: Shows ONE specific product with details, price, specs, customization options (e.g., /model-3/, /outdoor-sauna-4-person/)
 - CUSTOMIZATION PAGE: Dedicated page for configuring/customizing a product (e.g., /customize/, /configurator/, /build-your-sauna/)
+- LIST PAGE: Shows MULTIPLE products (collection/category page) with links to individual products (e.g., /products/, /saunas/, /shop/)
 - DUPLICATE: Different URLs showing the SAME product (e.g., /product/ vs /product?variant=1)
-- NON-PRODUCT: Categories, blogs, about pages, etc.
+- BLOG PAGE: Blog posts, articles, guides (has author, date, content)
+- OTHER: About pages, contact, etc.
 
 URLs to analyze:
 {url_list}
 
 For each URL, determine:
-1. Is it a PRODUCT page?
-2. Is it a CUSTOMIZATION page?
-3. Is it a DUPLICATE of another URL in this list?
-4. Confidence (0.0-1.0)
-5. Priority for scraping (1-10, where 10 is most important)
+1. Is it a PRODUCT page? (individual product)
+2. Is it a CUSTOMIZATION page? (configurator)
+3. Is it a LIST page? (collection/category with multiple products)
+4. Is it a BLOG page? (article/post)
+5. Is it a DUPLICATE of another URL in this list?
+6. Confidence (0.0-1.0)
+7. Priority for scraping (1-10, where 10 is most important)
 
 RESPOND WITH ONLY THIS EXACT JSON FORMAT:
 {{
@@ -172,12 +176,12 @@ RESPOND WITH ONLY THIS EXACT JSON FORMAT:
 }}
 
 RULES:
-- Product pages typically have specific model names/numbers in URL
+- Product pages have specific model names/numbers in URL or detailed customization
 - Customization pages have keywords: customize, configurator, build, design
+- List pages have multiple product links, keywords like /products/, /shop/, /collection/
+- Blog pages have /blog/, dates, author names, article structure
 - Duplicates: Look for URL parameters (?variant=, ?color=), trailing slashes, www vs non-www
-- Categories have plural/generic terms: /products/, /saunas/, /shop/
-- Blogs have: /blog/, /article/, dates in URL
-- Priority: 10=must scrape, 1=skip
+- Priority: 10=product/customization (must scrape), 1=list/blog (skip detailed scraping)
 
 Respond with JSON only, no markdown formatting."""
         
