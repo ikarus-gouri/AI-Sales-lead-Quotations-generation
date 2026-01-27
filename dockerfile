@@ -1,41 +1,31 @@
-# Dockerfile for Hugging Face Spaces
+# Hugging Face–compatible Python base
 FROM python:3.10-slim
+
+# Prevent Python from writing pyc files
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+# Create non-root user (HF best practice)
+RUN useradd -m -u 1000 user
+USER user
 
 # Set working directory
 WORKDIR /app
 
-# Create non-root user (required by HF Spaces)
-RUN useradd -m -u 1000 user
-RUN chown -R user:user /app
-
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    gcc \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy requirements first (for layer caching)
-COPY --chown=user:user requirements.txt .
-
-# Switch to non-root user
-USER user
-
-# Add user's local bin to PATH
+# Ensure local user installs are available
 ENV PATH="/home/user/.local/bin:$PATH"
 
-# Install Python dependencies
+# Copy only requirements first (better cache)
+COPY --chown=user requirements.txt .
+
+# Install dependencies
 RUN pip install --user --no-cache-dir -r requirements.txt
 
-# Copy application code
-COPY --chown=user:user . .
+# Copy the rest of the project
+COPY --chown=user . .
 
-# Create results directory
-RUN mkdir -p results
-
-# Expose port 7860 (HF Spaces standard)
+# Hugging Face requires port 7860
 EXPOSE 7860
 
-# Set environment variable for port
-ENV PORT=7860
-
-# Run the FastAPI application
-CMD ["python", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "7860"]
+# IMPORTANT: app.py must expose `app = FastAPI()`
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "7860"]
