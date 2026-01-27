@@ -1,171 +1,183 @@
-"""FastAPI wrapper for the web scraper."""
+"""
+FastAPI wrapper for the Product Catalog Web Scraper
+HF Spaces (Docker) compatible
+"""
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, HttpUrl, Field
-from typing import Optional, List
-import uvicorn
+from typing import Optional, List, Dict
+from datetime import datetime
 import uuid
 import os
 import json
-from datetime import datetime
+import uvicorn
+import traceback
 
 from src.core.config import ScraperConfig
 from src.core.scraper import TheraluxeScraper
 
-# Initialize FastAPI
+
+# ============================================================
+# APP INITIALIZATION
+# ============================================================
+
 app = FastAPI(
     title="Product Catalog Scraper API",
-    description="Extract product catalogs from any e-commerce website",
+    description="Extract structured product catalogs from e-commerce websites",
     version="1.0.0",
-    docs_url="/",  # Swagger UI at root
-    redoc_url="/redoc"
+    docs_url="/",
+    redoc_url="/redoc",
 )
 
-# Enable CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Storage for scraping jobs
-jobs = {}
+
+# ============================================================
+# GLOBAL STATE (HF-SAFE)
+# ============================================================
+
 RESULTS_DIR = "results"
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
+jobs: Dict[str, dict] = {}
+MAX_ACTIVE_JOBS = 2  # HF protection
 
-# Request/Response Models
+
+# ============================================================
+# REQUEST / RESPONSE MODELS
+# ============================================================
+
 class ScrapeRequest(BaseModel):
-    url: HttpUrl = Field(..., description="Target website URL to scrape")
-    max_pages: int = Field(50, ge=1, le=500, description="Maximum pages to crawl (1-500)")
-    max_depth: int = Field(3, ge=1, le=5, description="Maximum crawl depth (1-5)")
-    crawl_delay: float = Field(0.5, ge=0.1, le=5.0, description="Delay between requests in seconds")
-    export_formats: List[str] = Field(
-        ["json"],
-        description="Export formats: json, csv, csv_prices, quotation"
-    )
+    url: HttpUrl
+    max_pages: int = Field(50, ge=1, le=300)
+    max_depth: int = Field(3, ge=1, le=5)
+    crawl_delay: float = Field(0.5, ge=0.1, le=5.0)
+    export_formats: List[str] = ["json"]
 
     class Config:
         json_schema_extra = {
             "example": {
-                "url": "https://example.com/products",
+                "url": "https://example.com",
                 "max_pages": 50,
                 "max_depth": 3,
                 "crawl_delay": 0.5,
-                "export_formats": ["json", "csv"]
+                "export_formats": ["json", "csv"],
             }
         }
 
 
 class JobStatus(BaseModel):
     job_id: str
-    status: str  # "pending", "running", "completed", "failed"
+    status: str
     message: str
-    progress: Optional[dict] = None
-    result: Optional[dict] = None
+    progress: Optional[dict]
+    result: Optional[dict]
     created_at: str
-    completed_at: Optional[str] = None
+    completed_at: Optional[str]
 
 
-# Helper Functions
+# ============================================================
+# SCRAPER EXECUTION (BACKGROUND)
+# ============================================================
+
 def run_scraper_job(job_id: str, request: ScrapeRequest):
-    """Background task to run the scraper."""
     try:
-        # Update job status
         jobs[job_id]["status"] = "running"
-        jobs[job_id]["message"] = "Scraping in progress..."
-        
-        # Create config
+        jobs[job_id]["message"] = "Scraping started"
+        jobs[job_id]["progress"] = {"stage": "initializing"}
+
         config = ScraperConfig(
             base_url=str(request.url),
             max_pages=request.max_pages,
             max_depth=request.max_depth,
             crawl_delay=request.crawl_delay,
             output_dir=RESULTS_DIR,
-            output_filename=f"{job_id}.json"
+            output_filename=f"{job_id}.json",
         )
-        
-        # Run scraper
+
         scraper = TheraluxeScraper(config)
-        
-        # Update progress
-        jobs[job_id]["progress"] = {"stage": "crawling", "message": "Discovering pages..."}
-        
-        catalog = scraper.scrape_all_products()
-        
-        if not catalog:
-            jobs[job_id]["status"] = "failed"
-            jobs[job_id]["message"] = "No products found on the website"
-            jobs[job_id]["completed_at"] = datetime.now().isoformat()
-            return
-        
-        # Update progress
-        jobs[job_id]["progress"] = {"stage": "exporting", "message": "Saving results..."}
-        
-        # Save catalog
-        scraper.save_catalog(catalog, export_formats=request.export_formats)
-        
-        # Build result
-        result = {
-            "total_products": len(catalog),
-            "products": list(catalog.keys()),
-            "files": {
-                "json": f"{RESULTS_DIR}/{job_id}.json"
-            }
+
+        jobs[job_id]["progress"] = {
+            "stage": "crawling",
+            "message": "Discovering pages",
         }
-        
-        # Add other format files
+
+        catalog = scraper.scrape_all_products()
+
+        if not catalog:
+            raise RuntimeError("No products found")
+
+        jobs[job_id]["progress"] = {
+            "stage": "exporting",
+            "message": "Saving results",
+        }
+
+        scraper.save_catalog(catalog, export_formats=request.export_formats)
+
+        files = {"json": f"{RESULTS_DIR}/{job_id}.json"}
         if "csv" in request.export_formats:
-            result["files"]["csv"] = f"{RESULTS_DIR}/{job_id}.csv"
+            files["csv"] = f"{RESULTS_DIR}/{job_id}.csv"
         if "csv_prices" in request.export_formats:
-            result["files"]["csv_prices"] = f"{RESULTS_DIR}/{job_id}_with_prices.csv"
+            files["csv_prices"] = f"{RESULTS_DIR}/{job_id}_with_prices.csv"
         if "quotation" in request.export_formats:
-            result["files"]["quotation"] = f"{RESULTS_DIR}/{job_id}_quotation_template.json"
-        
-        # Update job
-        jobs[job_id]["status"] = "completed"
-        jobs[job_id]["message"] = f"Successfully scraped {len(catalog)} products"
-        jobs[job_id]["result"] = result
-        jobs[job_id]["completed_at"] = datetime.now().isoformat()
-        
+            files["quotation"] = f"{RESULTS_DIR}/{job_id}_quotation_template.json"
+
+        jobs[job_id].update(
+            status="completed",
+            message=f"Scraped {len(catalog)} products",
+            result={
+                "total_products": len(catalog),
+                "files": files,
+            },
+            completed_at=datetime.now().isoformat(),
+        )
+
     except Exception as e:
-        jobs[job_id]["status"] = "failed"
-        jobs[job_id]["message"] = f"Error: {str(e)}"
-        jobs[job_id]["completed_at"] = datetime.now().isoformat()
+        jobs[job_id].update(
+            status="failed",
+            message=str(e),
+            completed_at=datetime.now().isoformat(),
+        )
+        print(traceback.format_exc())
 
 
-# API Endpoints
+# ============================================================
+# API ENDPOINTS
+# ============================================================
+
 @app.get("/health")
-async def health_check():
-    """Health check endpoint."""
+def health():
     return {
         "status": "healthy",
+        "active_jobs": len([j for j in jobs.values() if j["status"] == "running"]),
         "timestamp": datetime.now().isoformat(),
-        "active_jobs": len([j for j in jobs.values() if j["status"] == "running"])
     }
 
 
 @app.post("/scrape", response_model=JobStatus)
-async def start_scrape(request: ScrapeRequest, background_tasks: BackgroundTasks):
-    """
-    Start a new scraping job.
-    
-    Returns a job_id that can be used to check status and download results.
-    """
-    # Validate export formats
-    valid_formats = ["json", "csv", "csv_prices", "quotation"]
-    invalid_formats = [f for f in request.export_formats if f not in valid_formats]
-    if invalid_formats:
+def start_scrape(request: ScrapeRequest, background_tasks: BackgroundTasks):
+    active_jobs = len([j for j in jobs.values() if j["status"] == "running"])
+    if active_jobs >= MAX_ACTIVE_JOBS:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many active jobs. Try again later.",
+        )
+
+    valid_formats = {"json", "csv", "csv_prices", "quotation"}
+    invalid = [f for f in request.export_formats if f not in valid_formats]
+    if invalid:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid export formats: {', '.join(invalid_formats)}"
+            detail=f"Invalid export formats: {invalid}",
         )
-    
-    # Create job
+
     job_id = str(uuid.uuid4())
     jobs[job_id] = {
         "job_id": job_id,
@@ -175,186 +187,71 @@ async def start_scrape(request: ScrapeRequest, background_tasks: BackgroundTasks
         "result": None,
         "created_at": datetime.now().isoformat(),
         "completed_at": None,
-        "request": request.dict()
     }
-    
-    # Start background task
+
     background_tasks.add_task(run_scraper_job, job_id, request)
-    
     return JobStatus(**jobs[job_id])
 
 
 @app.get("/jobs/{job_id}", response_model=JobStatus)
-async def get_job_status(job_id: str):
-    """
-    Get the status of a scraping job.
-    """
+def job_status(job_id: str):
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found")
-    
     return JobStatus(**jobs[job_id])
 
 
 @app.get("/jobs")
-async def list_jobs():
-    """
-    List all scraping jobs.
-    """
-    return {
-        "total": len(jobs),
-        "jobs": [JobStatus(**job) for job in jobs.values()]
-    }
+def list_jobs():
+    return {"jobs": list(jobs.values())}
 
 
 @app.get("/download/{job_id}/{format}")
-async def download_result(job_id: str, format: str):
-    """
-    Download scraping results in specified format.
-    
-    Formats: json, csv, csv_prices, quotation
-    """
+def download(job_id: str, format: str):
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found")
-    
+
     job = jobs[job_id]
-    
     if job["status"] != "completed":
-        raise HTTPException(
-            status_code=400,
-            detail=f"Job is {job['status']}, results not available yet"
-        )
-    
-    # Build file path
-    if format == "json":
-        filepath = f"{RESULTS_DIR}/{job_id}.json"
-        media_type = "application/json"
-        filename = f"catalog_{job_id}.json"
-    elif format == "csv":
-        filepath = f"{RESULTS_DIR}/{job_id}.csv"
-        media_type = "text/csv"
-        filename = f"catalog_{job_id}.csv"
-    elif format == "csv_prices":
-        filepath = f"{RESULTS_DIR}/{job_id}_with_prices.csv"
-        media_type = "text/csv"
-        filename = f"catalog_prices_{job_id}.csv"
-    elif format == "quotation":
-        filepath = f"{RESULTS_DIR}/{job_id}_quotation_template.json"
-        media_type = "application/json"
-        filename = f"quotation_{job_id}.json"
-    else:
+        raise HTTPException(status_code=400, detail="Job not completed")
+
+    suffix = {
+        "json": ".json",
+        "csv": ".csv",
+        "csv_prices": "_with_prices.csv",
+        "quotation": "_quotation_template.json",
+    }.get(format)
+
+    if not suffix:
         raise HTTPException(status_code=400, detail="Invalid format")
-    
-    if not os.path.exists(filepath):
+
+    path = f"{RESULTS_DIR}/{job_id}{suffix}"
+    if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="File not found")
-    
-    return FileResponse(
-        filepath,
-        media_type=media_type,
-        filename=filename
-    )
 
-
-@app.get("/catalog/{job_id}")
-async def get_catalog(job_id: str):
-    """
-    Get the full catalog JSON for a completed job.
-    """
-    if job_id not in jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
-    
-    job = jobs[job_id]
-    
-    if job["status"] != "completed":
-        raise HTTPException(
-            status_code=400,
-            detail=f"Job is {job['status']}, results not available yet"
-        )
-    
-    filepath = f"{RESULTS_DIR}/{job_id}.json"
-    
-    if not os.path.exists(filepath):
-        raise HTTPException(status_code=404, detail="Catalog file not found")
-    
-    with open(filepath, 'r') as f:
-        catalog = json.load(f)
-    
-    return catalog
+    return FileResponse(path, filename=os.path.basename(path))
 
 
 @app.delete("/jobs/{job_id}")
-async def delete_job(job_id: str):
-    """
-    Delete a job and its results.
-    """
+def delete_job(job_id: str):
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found")
-    
-    # Delete files
-    files_to_delete = [
-        f"{RESULTS_DIR}/{job_id}.json",
-        f"{RESULTS_DIR}/{job_id}.csv",
-        f"{RESULTS_DIR}/{job_id}_with_prices.csv",
-        f"{RESULTS_DIR}/{job_id}_quotation_template.json"
-    ]
-    
-    for filepath in files_to_delete:
-        if os.path.exists(filepath):
-            os.remove(filepath)
-    
-    # Delete job
+
+    for f in os.listdir(RESULTS_DIR):
+        if f.startswith(job_id):
+            os.remove(os.path.join(RESULTS_DIR, f))
+
     del jobs[job_id]
-    
-    return {"message": "Job deleted successfully"}
+    return {"message": "Job deleted"}
 
 
-# Example endpoint for quick test
-@app.post("/scrape-sync")
-async def scrape_sync(request: ScrapeRequest):
-    """
-    Synchronous scraping (for small jobs only).
-    WARNING: This will block until scraping is complete.
-    Only use for max_pages <= 10
-    """
-    if request.max_pages > 10:
-        raise HTTPException(
-            status_code=400,
-            detail="For large scrapes, use /scrape endpoint (async)"
-        )
-    
-    try:
-        # Create config
-        config = ScraperConfig(
-            base_url=str(request.url),
-            max_pages=request.max_pages,
-            max_depth=request.max_depth,
-            crawl_delay=request.crawl_delay,
-            output_dir=RESULTS_DIR,
-            output_filename=f"sync_{uuid.uuid4()}.json"
-        )
-        
-        # Run scraper
-        scraper = TheraluxeScraper(config)
-        catalog = scraper.scrape_all_products()
-        
-        if not catalog:
-            raise HTTPException(status_code=404, detail="No products found")
-        
-        return {
-            "total_products": len(catalog),
-            "catalog": catalog
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
+# ============================================================
+# ENTRY POINT (HF DOCKER)
+# ============================================================
 
 if __name__ == "__main__":
-    # Get port from environment (for deployment platforms)
-    port = int(os.environ.get("PORT", 8000))
-    
     uvicorn.run(
-        "api:app",
+        "app:app",
         host="0.0.0.0",
-        port=port,
-        reload=False
+        port=int(os.environ.get("PORT", 7860)),
+        reload=False,
     )
