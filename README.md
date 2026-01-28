@@ -1,9 +1,10 @@
 ---
-title: "Product Catalog Scraper"
-emoji: "🛒"
-colorFrom: "green"
-colorTo: "blue"
-sdk: "docker"
-app_file: "app.py"
+title: Product Catalogue Ai
+emoji: 📈
+colorFrom: red
+colorTo: green
+sdk: docker
 pinned: false
 ---
+
+Check out the configuration reference at https://huggingface.co/docs/hub/spaces-config-reference
