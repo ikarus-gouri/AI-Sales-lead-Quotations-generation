@@ -1,6 +1,7 @@
 """Google Sheets integration for catalog data."""
 
 import os
+import json
 from typing import Dict, List, Optional
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
@@ -24,19 +25,41 @@ class GoogleSheetsStorage:
         self._authenticate()
     
     def _authenticate(self):
-        """Authenticate with Google Sheets API."""
+        """Authenticate with Google Sheets API using file or environment variable."""
         try:
-            if not os.path.exists(self.credentials_file):
-                print(f"⚠ Credentials file not found: {self.credentials_file}")
-                print("  Please download service account credentials from Google Cloud Console")
+            # First, try to load from environment variable (for HuggingFace Spaces)
+            creds_json_str = os.getenv('GOOGLE_SHEETS_CREDS_JSON')
+            
+            if creds_json_str:
+                # Parse JSON string from environment
+                try:
+                    creds_dict = json.loads(creds_json_str)
+                    creds = Credentials.from_service_account_info(
+                        creds_dict,
+                        scopes=self.SCOPES
+                    )
+                    self.service = build('sheets', 'v4', credentials=creds)
+                    print("✓ Google Sheets authenticated from environment variable")
+                    return
+                except json.JSONDecodeError as e:
+                    print(f"⚠ Failed to parse GOOGLE_SHEETS_CREDS_JSON: {e}")
+            
+            # Fallback to credentials file
+            if os.path.exists(self.credentials_file):
+                creds = Credentials.from_service_account_file(
+                    self.credentials_file,
+                    scopes=self.SCOPES
+                )
+                self.service = build('sheets', 'v4', credentials=creds)
+                print(f"✓ Google Sheets authenticated from {self.credentials_file}")
                 return
             
-            creds = Credentials.from_service_account_file(
-                self.credentials_file,
-                scopes=self.SCOPES
-            )
-            self.service = build('sheets', 'v4', credentials=creds)
-            print("✓ Google Sheets authenticated successfully")
+            # No credentials found
+            print(f"⚠ Google Sheets credentials not found")
+            print("  Set GOOGLE_SHEETS_CREDS_JSON environment variable or")
+            print(f"  Provide {self.credentials_file} file")
+            self.service = None
+            
         except Exception as e:
             print(f"⚠ Failed to authenticate with Google Sheets: {e}")
             self.service = None
@@ -107,11 +130,14 @@ class GoogleSheetsStorage:
             all_data.extend(data)
             
             # Clear existing data
-            self.service.spreadsheets().values().clear(
-                spreadsheetId=spreadsheet_id,
-                range='Sheet1!A1'
-
-            ).execute()
+            try:
+                self.service.spreadsheets().values().clear(
+                    spreadsheetId=spreadsheet_id,
+                    range='Sheet1!A1:Z'
+                ).execute()
+            except HttpError:
+                # Sheet might not exist or might be empty
+                pass
             
             # Upload new data
             body = {
@@ -125,14 +151,14 @@ class GoogleSheetsStorage:
                 body=body
             ).execute()
             
-            print(f" Uploaded {result.get('updatedCells')} cells to Google Sheets")
+            print(f"✓ Uploaded {result.get('updatedCells')} cells to Google Sheets")
             return True
             
         except HttpError as e:
-            print(f"Failed to upload data: {e}")
+            print(f"✗ Failed to upload data: {e}")
             return False
     
-    def format_sheet(self, spreadsheet_id: str, sheet_name: str = 'Product Catalog'):
+    def format_sheet(self, spreadsheet_id: str, sheet_name: str = 'Sheet1'):
         """
         Apply formatting to the sheet (bold headers, freeze rows, etc.).
         
@@ -156,7 +182,8 @@ class GoogleSheetsStorage:
                     break
             
             if sheet_id is None:
-                return
+                # Default to first sheet
+                sheet_id = spreadsheet['sheets'][0]['properties']['sheetId']
             
             # Format requests
             requests = [
@@ -184,10 +211,15 @@ class GoogleSheetsStorage:
                             'userEnteredFormat': {
                                 'textFormat': {
                                     'bold': True
+                                },
+                                'backgroundColor': {
+                                    'red': 0.9,
+                                    'green': 0.9,
+                                    'blue': 0.9
                                 }
                             }
                         },
-                        'fields': 'userEnteredFormat.textFormat.bold'
+                        'fields': 'userEnteredFormat(textFormat,backgroundColor)'
                     }
                 },
                 # Auto-resize columns
@@ -197,7 +229,7 @@ class GoogleSheetsStorage:
                             'sheetId': sheet_id,
                             'dimension': 'COLUMNS',
                             'startIndex': 0,
-                            'endIndex': 5
+                            'endIndex': 10
                         }
                     }
                 }
@@ -221,7 +253,7 @@ class GoogleSheetsStorage:
         self,
         catalog: Dict,
         spreadsheet_id: Optional[str] = None,
-        title: str = "Theraluxe Product Catalog",
+        title: str = "Product Catalog",
         include_prices: bool = True
     ) -> Optional[str]:
         """
@@ -229,7 +261,7 @@ class GoogleSheetsStorage:
         
         Args:
             catalog: The product catalog
-            spreadsheet_id: Existing spreadsheet ID (creates new if None)
+            spreadsheet_id: Existing spreadsheet ID (creates new if None, or uses default from env)
             title: Title for new spreadsheet
             include_prices: Whether to include prices column
             
@@ -240,7 +272,13 @@ class GoogleSheetsStorage:
             print("⚠ Cannot save to Google Sheets - service not available")
             return None
         
-        # Create spreadsheet if needed
+        # Use default spreadsheet ID from environment if not provided
+        if not spreadsheet_id:
+            spreadsheet_id = os.getenv('GOOGLE_SPREADSHEET_ID')
+            if spreadsheet_id:
+                print(f"ℹ Using default spreadsheet ID from environment: {spreadsheet_id}")
+        
+        # Create spreadsheet if still no ID
         if not spreadsheet_id:
             spreadsheet_id = self.create_spreadsheet(title)
             if not spreadsheet_id:
@@ -250,9 +288,9 @@ class GoogleSheetsStorage:
         rows = []
         
         for product_id, product_data in catalog.items():
-            product_name = product_data['product_name']
-            base_price = product_data['base_price'] or 'N/A'
-            product_url = product_data['url']
+            product_name = product_data.get('product_name', 'Unknown Product')
+            base_price = product_data.get('base_price') or 'N/A'
+            product_url = product_data.get('url', '')
 
             # Product header
             if include_prices:
@@ -271,7 +309,11 @@ class GoogleSheetsStorage:
                 ])
 
             # Customization categories
-            for category, options in product_data['customizations'].items():
+            customizations = product_data.get('customizations', {})
+            for category, options in customizations.items():
+                if not options:
+                    continue
+                    
                 for i, option in enumerate(options):
                     # Handle both dict and string option types
                     if isinstance(option, dict):
@@ -282,6 +324,7 @@ class GoogleSheetsStorage:
                         label = str(option)
                         price = ''
                         image = ''
+                    
                     if include_prices:
                         rows.append([
                             category if i == 0 else '',

@@ -1,5 +1,5 @@
 """Main scraper orchestrator with dynamic configurator detection."""
-
+# src/core/balanced_scraper.py
 import time
 from typing import Dict, Optional
 from .config import ScraperConfig

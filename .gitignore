@@ -89,3 +89,5 @@ dump/
 results/
 tools/
 streamlit_app.py
+credentials.json
+.env
