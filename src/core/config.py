@@ -3,9 +3,14 @@
 import os
 from dataclasses import dataclass
 from typing import Optional
-from dotenv import load_dotenv
 
-load_dotenv()
+# Try to load dotenv if available
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    # dotenv not installed, just use environment variables
+    pass
 
 
 @dataclass

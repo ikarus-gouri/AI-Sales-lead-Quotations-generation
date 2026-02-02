@@ -101,6 +101,8 @@ class ScrapeRequest(BaseModel):
     crawl_delay: float = Field(0.5, ge=0.1, le=5.0)
     export_formats: List[str] = ["json"]
     strictness: str = Field("balanced", pattern="^(lenient|balanced|strict)$")
+    model: str = Field("S", pattern="^(S)$", description="Scraping model (deprecated, always uses S)")
+    headless: bool = Field(True, description="Deprecated parameter (no browser mode)")
     google_sheets_upload: bool = Field(False, description="Upload results to Google Sheets")
     google_sheets_id: Optional[str] = Field(None, description="Existing spreadsheet ID (uses env default if not provided)")
 
@@ -113,6 +115,8 @@ class ScrapeRequest(BaseModel):
                 "crawl_delay": 0.5,
                 "export_formats": ["json", "csv"],
                 "strictness": "balanced",
+                "model": "S",
+                "headless": False,
                 "google_sheets_upload": False,
                 "google_sheets_id": None
             }
@@ -151,13 +155,14 @@ class GoogleSheetsUploadRequest(BaseModel):
 # SCRAPER EXECUTION (BACKGROUND)
 # ============================================================
 
-def run_scraper_job(job_id: str, request: ScrapeRequest):
-    """Execute scraping job in background with balanced scraper"""
+async def run_scraper_job_async(job_id: str, request: ScrapeRequest):
+    """Execute scraping job (static scraping only)"""
     try:
         jobs[job_id]["status"] = "running"
         jobs[job_id]["message"] = f"Scraping started (strictness: {request.strictness})"
         jobs[job_id]["progress"] = {
             "stage": "initializing",
+            "model": "S",
             "strictness": request.strictness
         }
 
@@ -171,20 +176,22 @@ def run_scraper_job(job_id: str, request: ScrapeRequest):
             output_filename=f"{job_id}.json",
         )
 
-        # Initialize balanced scraper with strictness level
+        # Always use static scraper (Model D removed)
         scraper = BalancedScraper(config, strictness=request.strictness)
-
+        
         jobs[job_id]["progress"] = {
             "stage": "crawling",
             "message": f"Discovering pages (strictness: {request.strictness})",
+            "model": "S"
         }
-
-        # Scrape all products with balanced approach
+        
+        # Scrape with static method
         catalog = scraper.scrape_all_products()
+        model_used = "S"
 
         if not catalog:
             raise RuntimeError(
-                f"No products found with {request.strictness} strictness. "
+                f"No products found with {request.strictness} strictness using Model {model_used}. "
                 f"Try 'lenient' mode for higher recall."
             )
 
@@ -208,6 +215,7 @@ def run_scraper_job(job_id: str, request: ScrapeRequest):
         result_data = {
             "total_products": len(catalog),
             "strictness": request.strictness,
+            "model_used": model_used,
             "files": files,
         }
 
@@ -286,6 +294,21 @@ def run_scraper_job(job_id: str, request: ScrapeRequest):
         }
         print(f"Job {job_id} failed: {e}")
         traceback.print_exc()
+
+
+def run_scraper_job(job_id: str, request: ScrapeRequest):
+    \"\"\"Wrapper to run async scraper job in background thread\"\"\"
+    import asyncio
+    
+    try:
+        # Create new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # Run async function
+        loop.run_until_complete(run_scraper_job_async(job_id, request))
+    finally:
+        loop.close()
 
 
 # ============================================================
@@ -548,8 +571,17 @@ def delete_job(job_id: str):
 def scraper_info():
     """Get information about the scraper capabilities"""
     return {
-        "version": "2.1.0",
-        "scraper_type": "balanced",
+        "version": "3.0.0",
+        "scraper_type": "static",
+        "models": {
+            "S": {
+                "name": "Model S (Static)",
+                "description": "Static HTML scraping",
+                "use_case": "All product pages",
+                "speed": "Fast",
+                "browser_required": False
+            }
+        },
         "strictness_levels": {
             "lenient": {
                 "description": "High recall - catches all products, some false positives",
@@ -585,6 +617,17 @@ def scraper_info():
         }
     }
 
+
+@app.post("/scrape/static", response_model=JobStatus)
+def start_scrape_static(request: ScrapeRequest, background_tasks: BackgroundTasks):
+    """
+    Start Model S (Static) scraping job
+    
+    Force static scraping regardless of page type.
+    Fast but may not work on JavaScript-heavy pages.
+    """
+    request.model = "S"
+    return start_scrape(request, background_tasks)
 
 # ============================================================
 # ENTRY POINT (HF DOCKER)
