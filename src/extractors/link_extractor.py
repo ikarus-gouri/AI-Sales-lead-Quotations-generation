@@ -18,7 +18,7 @@ class LinkExtractor:
         Args:
             markdown: The markdown content
             base_url: The base URL for making links absolute
-            
+             
         Returns:
             Set of cleaned, absolute URLs (excluding images and media)
         """

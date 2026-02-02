@@ -76,7 +76,7 @@ class CSVStorage:
                             options[0].get("image", "")
                         ])
 
-                        # Remaining options
+                        # Remaining opti ons
                         for opt in options[1:]:
                             rows.append([
                                 "",

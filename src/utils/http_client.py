@@ -18,7 +18,7 @@ class HTTPClient:
         Args:
             url: The URL to scrape
             
-        Returns:
+        Returns: 
             Markdown content or None if failed
         """
         try:

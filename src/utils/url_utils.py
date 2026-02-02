@@ -22,7 +22,7 @@ class URLUtils:
     def clean_url(url: str) -> str:
         """
         Clean URL by removing fragments and query parameters.
-        
+         
         Args:
             url: The URL to clean
             

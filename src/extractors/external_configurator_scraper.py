@@ -18,7 +18,7 @@ class ExternalConfiguratorScraper:
             product_extractor: ProductExtractor instance with extract_customizations method
         """
         self.http_client = http_client
-        self.product_extractor = product_extractor
+        self.product_extractor = product_extractor 
     
     def scrape_external_configurator(
         self, 

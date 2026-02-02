@@ -1,8 +1,9 @@
 """Enhanced web crawler with robust URL detection and logging.
 
-File: src/crawlers/web_crawler.py (UPDATED)
+File: src/crawlers/web_crawler.py (FIXED)
 """
 
+import re
 import time
 from typing import Set, Tuple, Dict, List
 from ..utils.http_client import HTTPClient
@@ -17,6 +18,7 @@ class WebCrawler:
     - Detailed logging of skipped URLs with reasons
     - Smart duplicate detection
     - Progress tracking
+    - Compatible with both BalancedClassifier and DynamicClassifier
     """
     
     def __init__(
@@ -24,7 +26,7 @@ class WebCrawler:
         base_url: str,
         http_client: HTTPClient,
         link_extractor: LinkExtractor,
-        classifier: BaseClassifier,
+        classifier: BaseClassifier, 
         crawl_delay: float = 0.5
     ):
         """
@@ -34,7 +36,7 @@ class WebCrawler:
             base_url: The base URL to crawl
             http_client: HTTP client for making requests
             link_extractor: Link extractor for finding URLs
-            classifier: Page classifier
+            classifier: Page classifier (BalancedClassifier or DynamicClassifier)
             crawl_delay: Delay between requests in seconds
         """
         self.base_url = base_url
@@ -191,7 +193,7 @@ class WebCrawler:
                 self.skipped_urls[current_url] = reason
                 self.stats['total_skipped'] += 1
                 self.stats['skip_reasons'][reason] = self.stats['skip_reasons'].get(reason, 0) + 1
-                print(f"  ⏭️  Skipping ({reason}): {current_url}")
+                print(f"  \033[33m[SKIP]\033[0m ({reason}): {current_url}")
                 continue
             
             # Progress indicator
@@ -202,11 +204,15 @@ class WebCrawler:
             try:
                 markdown = self.http_client.scrape_with_jina(current_url)
                 if not markdown:
-                    raise ValueError("Empty content returned from HTTP client")
+                    self.failed_urls[current_url] = "empty_response"
+                    self.stats['total_failed'] += 1
+                    print(f"  \033[31m[x]\033[0m Failed to fetch content")
+                    self.visited_pages.add(current_url)
+                    continue
             except Exception as e:
-                self.failed_urls[current_url] = str(e)
+                self.failed_urls[current_url] = f"fetch_error: {e}"
                 self.stats['total_failed'] += 1
-                print(f"  ✗ Failed to fetch content: {e}")
+                print(f"  \033[31m[x]\033[0m Failed to fetch content: {e}")
                 self.visited_pages.add(current_url)
                 continue
 
@@ -217,42 +223,29 @@ class WebCrawler:
 
             # Classify the page with error handling
             try:
-                if hasattr(self.classifier, 'classify'):
-                    classification = self.classifier.classify(current_url, markdown)
-                    page_type = classification.page_type
-                    confidence = classification.confidence
-
-                    if page_type == 'product':
-                        self.product_pages.add(current_url)
-                        self.stats['products_found'] += 1
-                        print(f"  ✓ PRODUCT PAGE DETECTED")
-                        print(f"    Confidence: {confidence:.0%}")
-                        if classification.signals.get('product'):
-                            print(f"    Signals: {classification.signals['product']}")
-                    elif page_type == 'list':
-                        print(f"  📋 LIST PAGE (collection/category)")
-                        print(f"    Confidence: {confidence:.0%}")
-                        if classification.signals.get('list', {}).get('product_links'):
-                            link_count = classification.signals['list']['product_links']
-                            print(f"    Contains {link_count} product links")
-                    elif page_type == 'blog':
-                        print(f"  📝 BLOG PAGE (article/post)")
-                        print(f"    Confidence: {confidence:.0%}")
-                    else:
-                        print(f"    Other page type")
+                classification = self._classify_page(current_url, markdown)
+                
+                if classification['is_product']:
+                    self.product_pages.add(current_url)
+                    self.stats['products_found'] += 1
+                    print(f"  \033[32m[✓]\033[0m PRODUCT PAGE DETECTED")
+                    print(f"    Confidence: {classification['confidence']:.0%}")
+                    if classification.get('model'):
+                        print(f"    Model: {classification['model']}")
+                elif classification.get('page_type') == 'list':
+                    print(f"  \033[34m[LIST]\033[0m LIST PAGE (collection/category)")
+                    print(f"    Confidence: {classification['confidence']:.0%}")
+                elif classification.get('page_type') == 'blog':
+                    print(f"  \033[35m[BLOG]\033[0m BLOG PAGE (article/post)")
+                    print(f"    Confidence: {classification['confidence']:.0%}")
                 else:
-                    # Legacy classifier
-                    is_product = self.classifier.is_product_page(current_url, markdown)
-                    if is_product:
-                        self.product_pages.add(current_url)
-                        self.stats['products_found'] += 1
-                        print(f"  ✓ PRODUCT PAGE DETECTED")
-                    else:
-                        print(f"  ○ Not a product page")
+                    print(f"  \033[90m[ ]\033[0m Not a product page")
+                print(classification.get('reasons', ''))
+                    
             except Exception as e:
+                print(f"  \033[31m[x]\033[0m Classification failed: {e}")
                 self.failed_urls[current_url] = f"classifier_error: {e}"
                 self.stats['total_failed'] += 1
-                print(f"  ✗ Classification failed: {e}")
 
             # Extract links with error handling
             try:
@@ -261,7 +254,7 @@ class WebCrawler:
                 links = []
                 self.failed_urls[current_url] = f"link_extraction_error: {e}"
                 self.stats['total_failed'] += 1
-                print(f"  ✗ Link extraction failed: {e}")
+                print(f"  \033[31m[x]\033[0m Link extraction failed: {e}")
             
             # Add new links to visit queue
             new_links_added = 0
@@ -294,12 +287,59 @@ class WebCrawler:
         
         return self.product_pages
     
+    def _classify_page(self, url: str, markdown: str) -> Dict:
+        """
+        Classify page using either BalancedClassifier or DynamicClassifier.
+        
+        Returns unified dictionary format:
+        {
+            'is_product': bool,
+            'page_type': str,
+            'confidence': float,
+            'model': str (optional, for DynamicClassifier)
+        }
+        """
+
+        # Check if classifier has classify_page method (DynamicClassifier)
+        if hasattr(self.classifier, 'classify_page'):
+            result = self.classifier.classify_page(url, markdown)
+            # DynamicClassifier returns a dict already
+            return result
+        
+        # Check if classifier has classify method (BalancedClassifier)
+        elif hasattr(self.classifier, 'classify'):
+            classification = self.classifier.classify(url, markdown)
+            
+            # Convert Classification object to dict
+            # Handle both enum and string page_type
+            page_type = classification.page_type
+            if hasattr(page_type, 'value'):
+                # It's an enum - get the string value
+                page_type = page_type.value
+            
+            return {
+                'is_product': classification.is_product,
+                'page_type': page_type,  # Now guaranteed to be a string
+                'confidence': classification.confidence,
+                'signals': classification.signals if hasattr(classification, 'signals') else {},
+                'reasons': classification.reasons if hasattr(classification, 'reasons') else []
+            }
+        
+        # Fallback: legacy is_product_page method
+        else:
+            is_product = self.classifier.is_product_page(url, markdown)
+            return {
+                'is_product': is_product,
+                'page_type': 'product' if is_product else 'other',
+                'confidence': 1.0 if is_product else 0.0
+            }
+    
     def _print_crawl_summary(self):
         """Print detailed crawl summary."""
         print(f"\n{'='*80}")
         print("CRAWL SUMMARY")
         print(f"{'='*80}")
-        print(f"📊 Statistics:")
+        print(f"\033[36m[STATS]\033[0m Statistics:")
         print(f"   Total URLs discovered: {self.stats['total_discovered']}")
         print(f"   Total pages crawled: {self.stats['total_crawled']}")
         print(f"   Product pages found: {self.stats['products_found']}")
@@ -308,7 +348,7 @@ class WebCrawler:
         
         # Skip reasons breakdown
         if self.stats['skip_reasons']:
-            print(f"\n📋 Skip Reasons:")
+            print(f"\n\033[34m[INFO]\033[0m Skip Reasons:")
             sorted_reasons = sorted(
                 self.stats['skip_reasons'].items(), 
                 key=lambda x: x[1], 
@@ -322,7 +362,7 @@ class WebCrawler:
         
         # Show some product pages found
         if self.product_pages:
-            print(f"\n✅ Product Pages Found ({len(self.product_pages)}):")
+            print(f"\n\033[32m[SUCCESS]\033[0m Product Pages Found ({len(self.product_pages)}):")
             for i, url in enumerate(list(self.product_pages)[:5], 1):
                 print(f"   {i}. {url}")
             if len(self.product_pages) > 5:
@@ -330,7 +370,7 @@ class WebCrawler:
         
         # Show some skipped URLs (for debugging)
         if self.skipped_urls:
-            print(f"\n⏭️  Sample Skipped URLs:")
+            print(f"\n\033[33m[SKIPPED]\033[0m Sample Skipped URLs:")
             skip_samples = list(self.skipped_urls.items())[:3]
             for url, reason in skip_samples:
                 print(f"   {url}")
@@ -338,7 +378,7 @@ class WebCrawler:
         
         # Show failed URLs
         if self.failed_urls:
-            print(f"\n❌ Failed URLs ({len(self.failed_urls)}):")
+            print(f"\n\033[31m[FAILED]\033[0m Failed URLs ({len(self.failed_urls)}):")
             for url, error in list(self.failed_urls.items())[:3]:
                 print(f"   {url}")
                 print(f"     → Error: {error}")
@@ -367,7 +407,7 @@ class WebCrawler:
         with open(filepath, 'w') as f:
             json.dump(report, f, indent=2)
         
-        print(f"✓ Crawl report saved: {filepath}")
+        print(f"\033[32m[✓]\033[0m Crawl report saved: {filepath}")
     
     def get_page_content(self, url: str) -> str:
         """
@@ -383,10 +423,3 @@ class WebCrawler:
         """
         normalized = self._normalize_url(url)
         return self.page_cache.get(normalized, self.page_cache.get(url, ""))
-
-
-# ====================================================================
-# Import fix for regex
-# ====================================================================
-
-import re

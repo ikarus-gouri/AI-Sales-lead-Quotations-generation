@@ -1,4 +1,27 @@
-"""Main scraper with balanced classification (lenient + strict combined)."""
+"""Model-S: Static extraction scraper with balanced classification.
+
+This is the fast, efficient extraction model that uses Jina AI markdown conversion
+and pattern matching to extract product information without browser automation.
+
+Features:
+    - Fast extraction using HTTP requests only
+    - Balanced classification (lenient + strict combined)
+    - Configurable strictness levels
+    - External configurator support
+    - Multiple export formats
+
+Workflow:
+    1. Crawl website to discover product pages
+    2. Classify pages using BalancedClassifier
+    3. Extract product data from markdown
+    4. Detect and handle configurators (embedded/external)
+    5. Export to multiple formats (JSON, CSV, etc.)
+
+Usage:
+    scraper = BalancedScraper(config, strictness="balanced")
+    catalog = scraper.scrape_all_products()
+    scraper.save_catalog(catalog, export_formats=['json', 'csv'])
+"""
 # src/core/balanced_scraper.py
 import time
 from typing import Dict, Optional
@@ -17,11 +40,25 @@ from ..storage.quotation_template import QuotationTemplate
 
 
 class BalancedScraper:
-    """
-    Main scraper with balanced classification.
+    """Model-S: Static extraction scraper.
     
-    Combines lenient and strict approaches for optimal results.
-    Configurable strictness: LENIENT, BALANCED, or STRICT.
+    This is the fast, efficient extraction model that operates without
+    browser automation. It uses Jina AI markdown conversion and pattern
+    matching to extract product information.
+    
+    Attributes:
+        config: ScraperConfig with crawl and export settings
+        classifier: BalancedClassifier for page classification
+        crawler: WebCrawler for page discovery
+        product_extractor: ProductExtractor for data extraction
+        configurator_detector: ConfiguratorDetector for configurator detection
+        external_scraper: ExternalConfiguratorScraper for external platforms
+    
+    Example:
+        >>> config = ScraperConfig(base_url="https://example.com")
+        >>> scraper = BalancedScraper(config, strictness="balanced")
+        >>> catalog = scraper.scrape_all_products()
+        >>> scraper.save_catalog(catalog, export_formats=['json', 'csv'])
     """
     
     def __init__(self, config: ScraperConfig, strictness: str = "balanced"):
@@ -84,9 +121,9 @@ class BalancedScraper:
         Returns:
             Product data dictionary or None
         """
-        print(f"\n{'─'*80}")
+        print(f"\n{'-'*80}")
         print(f"Scraping product: {url}")
-        print(f"{'─'*80}")
+        print(f"{'-'*80}")
         
         # Scrape the page
         markdown = self.http_client.scrape_with_jina(url)
@@ -98,7 +135,7 @@ class BalancedScraper:
         classification = self.classifier.classify(url, markdown)
         
         if not classification.is_product:
-            print(f"  ⚠️  Page reclassified as {classification.page_type}")
+            print(f"  \033[33m[WARN]\033[0m Page reclassified as {classification.page_type}")
             print(f"     Confidence: {classification.confidence:.0%}")
             print(f"     Reasons: {', '.join(classification.reasons[:2])}")
             return None
@@ -208,7 +245,7 @@ class BalancedScraper:
         }
         
         # Print summary
-        print(f"\n  📦 Product Summary:")
+        print(f"\n   Product Summary:")
         print(f"     Name: {product_name}")
         print(f"     Price: {base_price or 'Not found'}")
         print(f"     Categories: {len(customizations)}")
@@ -237,7 +274,7 @@ class BalancedScraper:
         )
         
         if not product_urls:
-            print("\n⚠️  No product pages found!")
+            print("\n\033[33m[WARN]\033[0m No product pages found!")
             return {}
         
         # Step 2: Scrape each product
@@ -331,10 +368,10 @@ class BalancedScraper:
         print(f"   Total Customization Categories: {total_categories}")
         print(f"   Total Customization Options: {total_options}\n")
         
-        print(f"{'─'*80}\n")
+        print(f"{'-'*80}\n")
         
         for product_id, data in catalog.items():
-            print(f"📦 {data['product_name']}")
+            print(f"\033[35m[PRODUCT]\033[0m {data['product_name']}")
             print(f"   URL: {data['url']}")
             print(f"   Price: {data['base_price'] or 'N/A'}")
             print(f"   Classification: {data['page_type']} ({data['classification_confidence']:.0%} confidence)")

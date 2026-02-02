@@ -17,7 +17,7 @@ class ColorExtractionResult:
     confidence: float
     detection_reason: str
     error: Optional[str] = None
-    
+     
     def to_dict(self) -> Dict:
         """Convert to dictionary for JSON serialization."""
         return asdict(self)

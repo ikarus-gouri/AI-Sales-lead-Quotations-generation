@@ -12,7 +12,7 @@ class ProductExtractor:
 
     def __init__(
         self,
-        enable_color_extraction: bool = True,
+        enable_color_extraction: bool = False,
         use_llm_naming: bool = False
     ):
         self.enable_color_extraction = enable_color_extraction
@@ -182,7 +182,7 @@ class ProductExtractor:
 
             for opt in options:
                 label = opt['label'].strip()
-                key = label.lower()
+                key = label.lower() 
 
                 if len(label) < 3:
                     continue

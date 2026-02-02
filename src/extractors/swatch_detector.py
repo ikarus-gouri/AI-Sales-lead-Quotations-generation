@@ -23,7 +23,7 @@ class ColorSwatchDetector:
     1. Contextual keywords near images
     2. Image filename patterns
     3. Alt text analysis
-    4. Structural patterns (multiple small images in sequence)
+    4. Structural patterns (multiple small images in sequence) 
     """
     
     def __init__(self):

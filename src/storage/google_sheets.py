@@ -340,7 +340,7 @@ class GoogleSheetsStorage:
                             image
                         ])
         
-        # Header row
+        # Header row 
         header = ['Categories', 'Component', 'Price', 'References', 'Notes'] if include_prices else ['Categories', 'Component', 'References']
         
         # Upload data
