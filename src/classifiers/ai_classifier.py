@@ -48,9 +48,9 @@ A product customization page typically has:
 URL: {url}
 
 Content sample:
-\"\"\"
+"""
 {content_sample}
-\"\"\"
+"""
 
 Respond with ONLY "YES" or "NO".
 """
