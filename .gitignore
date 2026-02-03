@@ -91,3 +91,5 @@ tools/
 streamlit_app.py
 credentials.json
 .env
+readmes/
+graphs/
