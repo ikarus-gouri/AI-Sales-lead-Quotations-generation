@@ -1,8 +1,13 @@
 # src/core/__init__.py
 """Core scraper components."""
-import argparse
-from .scraper import TheraluxeScraper
-from .config import ScraperConfig
 
-__all__ = ['TheraluxeScraper', 'ScraperConfig',]
+from .config import ScraperConfig
+from .balanced_scraper import BalancedScraper
+from .dynamic_scraper import DynamicScraper
+
+__all__ = [
+    'ScraperConfig',
+    'BalancedScraper',
+    'DynamicScraper',
+]
 

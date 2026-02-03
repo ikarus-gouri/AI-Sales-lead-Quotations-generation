@@ -43,3 +43,9 @@ streamlit
 tqdm
 fastapi
 uvicorn
+
+gradio==4.16.0
+playwright==1.41.0
+google-generativeai==0.3.2
+python-dotenv==1.0.0
+pandas==2.1.4

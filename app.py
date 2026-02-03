@@ -101,6 +101,8 @@ class ScrapeRequest(BaseModel):
     crawl_delay: float = Field(0.5, ge=0.1, le=5.0)
     export_formats: List[str] = ["json"]
     strictness: str = Field("balanced", pattern="^(lenient|balanced|strict)$")
+    model: str = Field("S", pattern="^(S|LAM)$", description="Scraping model: S (static) or LAM (Gemini + Playwright)")
+    headless: bool = Field(True, description="Deprecated parameter (no browser mode)")
     google_sheets_upload: bool = Field(False, description="Upload results to Google Sheets")
     google_sheets_id: Optional[str] = Field(None, description="Existing spreadsheet ID (uses env default if not provided)")
 
@@ -113,6 +115,8 @@ class ScrapeRequest(BaseModel):
                 "crawl_delay": 0.5,
                 "export_formats": ["json", "csv"],
                 "strictness": "balanced",
+                "model": "LAM",
+                "headless": False,
                 "google_sheets_upload": False,
                 "google_sheets_id": None
             }
@@ -151,13 +155,14 @@ class GoogleSheetsUploadRequest(BaseModel):
 # SCRAPER EXECUTION (BACKGROUND)
 # ============================================================
 
-def run_scraper_job(job_id: str, request: ScrapeRequest):
-    """Execute scraping job in background with balanced scraper"""
+async def run_scraper_job_async(job_id: str, request: ScrapeRequest):
+    """Execute scraping job (supports LAM with Gemini + Playwright or static S)"""
     try:
         jobs[job_id]["status"] = "running"
-        jobs[job_id]["message"] = f"Scraping started (strictness: {request.strictness})"
+        jobs[job_id]["message"] = f"Scraping started (model: {request.model}, strictness: {request.strictness})"
         jobs[job_id]["progress"] = {
             "stage": "initializing",
+            "model": request.model,
             "strictness": request.strictness
         }
 
@@ -171,20 +176,58 @@ def run_scraper_job(job_id: str, request: ScrapeRequest):
             output_filename=f"{job_id}.json",
         )
 
-        # Initialize balanced scraper with strictness level
-        scraper = BalancedScraper(config, strictness=request.strictness)
+        # Choose scraper based on model
+        if request.model == "LAM":
+            try:
+                from src.core.lam_scraper import LAMScraper
+                scraper = LAMScraper(config, strictness=request.strictness, enable_gemini=True)
+                model_used = "LAM"
+                
+                jobs[job_id]["progress"] = {
+                    "stage": "identifying",
+                    "message": "[LAM Step 1] Identifying all product pages",
+                    "model": "LAM"
+                }
+            except ImportError as e:
+                print(f"⚠️ LAM model not available: {e}")
+                print("   Falling back to Model S (static)")
+                scraper = BalancedScraper(config, strictness=request.strictness)
+                model_used = "S"
+                jobs[job_id]["progress"] = {
+                    "stage": "crawling",
+                    "message": f"LAM unavailable, using static model (strictness: {request.strictness})",
+                    "model": "S"
+                }
+        else:
+            # Use static scraper (Model S)
+            scraper = BalancedScraper(config, strictness=request.strictness)
+            model_used = "S"
+            jobs[job_id]["progress"] = {
+                "stage": "crawling",
+                "message": f"Discovering pages (strictness: {request.strictness})",
+                "model": "S"
+            }
+        
+        # Scrape with selected model
+        # LAM scraper's scrape_all_products is async, BalancedScraper's is sync
+        if model_used == "LAM":
+            catalog = await scraper.scrape_all_products()
+        else:
+            catalog = scraper.scrape_all_products()
 
-        jobs[job_id]["progress"] = {
-            "stage": "crawling",
-            "message": f"Discovering pages (strictness: {request.strictness})",
-        }
-
-        # Scrape all products with balanced approach
-        catalog = scraper.scrape_all_products()
-
-        if not catalog:
+        # Handle both catalog formats
+        if isinstance(catalog, dict) and 'products' in catalog:
+            # New LAM format
+            products = catalog['products']
+            total_products = len(products)
+        else:
+            # Old format (dict of product_name: data)
+            products = catalog
+            total_products = len(catalog) if catalog else 0
+        
+        if total_products == 0:
             raise RuntimeError(
-                f"No products found with {request.strictness} strictness. "
+                f"No products found with {request.strictness} strictness using Model {model_used}. "
                 f"Try 'lenient' mode for higher recall."
             )
 
@@ -206,10 +249,16 @@ def run_scraper_job(job_id: str, request: ScrapeRequest):
             files["quotation"] = f"{RESULTS_DIR}/{job_id}_quotation_template.json"
 
         result_data = {
-            "total_products": len(catalog),
+            "total_products": total_products,
             "strictness": request.strictness,
+            "model_used": model_used,
             "files": files,
         }
+        
+        # Add LAM-specific stats if available
+        if isinstance(catalog, dict) and 'configurators_detected' in catalog:
+            result_data["configurators_detected"] = catalog.get('configurators_detected', 0)
+            result_data["workflow"] = catalog.get('workflow', 'standard')
 
         # Google Sheets upload if requested
         if request.google_sheets_upload:
@@ -236,9 +285,17 @@ def run_scraper_job(job_id: str, request: ScrapeRequest):
                         if sheets_id:
                             print(f"ℹ Using default spreadsheet ID from environment")
                     
-                    # Upload to Google Sheets
+                    # Upload to Google Sheets (convert to old format if needed)
+                    catalog_for_sheets = catalog
+                    if isinstance(catalog, dict) and 'products' in catalog:
+                        # Convert LAM format to dict format for Google Sheets
+                        catalog_for_sheets = {}
+                        for i, product in enumerate(catalog['products']):
+                            key = f"{product.get('product_name', 'product')}_{i}"
+                            catalog_for_sheets[key] = product
+                    
                     spreadsheet_id = google_sheets.save_catalog(
-                        catalog=catalog,
+                        catalog=catalog_for_sheets,
                         spreadsheet_id=sheets_id,
                         title=f"Product Catalog - {datetime.now().strftime('%Y-%m-%d %H:%M')}",
                         include_prices=True
@@ -267,12 +324,18 @@ def run_scraper_job(job_id: str, request: ScrapeRequest):
 
         # Update job as completed
         jobs[job_id]["status"] = "completed"
-        jobs[job_id]["message"] = "Scraping completed successfully"
+        jobs[job_id]["message"] = f"Scraping completed successfully using Model {model_used}"
         jobs[job_id]["result"] = result_data
         jobs[job_id]["completed_at"] = datetime.now().isoformat()
+        
+        completion_msg = f"Found {total_products} products"
+        if model_used == "LAM" and isinstance(catalog, dict) and 'configurators_detected' in catalog:
+            completion_msg += f" ({catalog['configurators_detected']} with configurators)"
+        
         jobs[job_id]["progress"] = {
             "stage": "completed",
-            "message": f"Found {len(catalog)} products"
+            "message": completion_msg,
+            "model": model_used
         }
 
     except Exception as e:
@@ -286,6 +349,21 @@ def run_scraper_job(job_id: str, request: ScrapeRequest):
         }
         print(f"Job {job_id} failed: {e}")
         traceback.print_exc()
+
+
+def run_scraper_job(job_id: str, request: ScrapeRequest):
+    """Wrapper to run async scraper job in background thread"""
+    import asyncio
+    
+    try:
+        # Create new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # Run async function
+        loop.run_until_complete(run_scraper_job_async(job_id, request))
+    finally:
+        loop.close()
 
 
 # ============================================================
@@ -306,10 +384,27 @@ def read_root():
 @app.get("/health")
 def health_check():
     """Health check endpoint"""
+    # Check LAM availability
+    lam_available = False
+    gemini_available = False
+    try:
+        from src.core.lam_scraper import LAMScraper
+        lam_available = True
+        # Check if Gemini API key is available
+        gemini_api_key = os.getenv('GEMINI_API_KEY') or os.getenv('GEMINAI_API_KEY')
+        gemini_available = bool(gemini_api_key)
+    except ImportError:
+        pass
+    
     return {
         "status": "healthy",
         "version": "2.1.0",
         "scraper_type": "balanced",
+        "models_available": {
+            "S": True,
+            "LAM": lam_available,
+            "gemini_configured": gemini_available
+        },
         "google_sheets_available": google_sheets is not None and google_sheets.service is not None,
         "default_spreadsheet_configured": os.getenv('GOOGLE_SPREADSHEET_ID') is not None,
         "active_jobs": len([j for j in jobs.values() if j["status"] == "running"]),
@@ -322,7 +417,36 @@ def get_features():
     """Get available features and their status"""
     default_sheets_id = os.getenv('GOOGLE_SPREADSHEET_ID')
     
+    # Check LAM availability
+    lam_available = False
+    gemini_available = False
+    try:
+        from src.core.lam_scraper import LAMScraper
+        lam_available = True
+        gemini_api_key = os.getenv('GEMINI_API_KEY') or os.getenv('GEMINAI_API_KEY')
+        gemini_available = bool(gemini_api_key)
+    except ImportError:
+        pass
+    
     return {
+        "models": {
+            "S": {
+                "available": True,
+                "description": "Static scraping with balanced classification",
+                "features": ["Fast", "No API costs", "Works offline"]
+            },
+            "LAM": {
+                "available": lam_available,
+                "gemini_configured": gemini_available,
+                "description": "AI-powered with Gemini + Playwright interactive extraction",
+                "features": ["Intelligent configurator detection", "Interactive extraction", "Higher accuracy"],
+                "workflow": [
+                    "Step 1: Identify all product pages",
+                    "Step 2: Gemini detects configurators",
+                    "Step 3: Playwright + Gemini interactive extraction"
+                ]
+            }
+        },
         "google_sheets": {
             "enabled": google_sheets is not None and google_sheets.service is not None,
             "default_spreadsheet_configured": default_sheets_id is not None,
@@ -548,8 +672,17 @@ def delete_job(job_id: str):
 def scraper_info():
     """Get information about the scraper capabilities"""
     return {
-        "version": "2.1.0",
-        "scraper_type": "balanced",
+        "version": "3.0.0",
+        "scraper_type": "static",
+        "models": {
+            "S": {
+                "name": "Model S (Static)",
+                "description": "Static HTML scraping",
+                "use_case": "All product pages",
+                "speed": "Fast",
+                "browser_required": False
+            }
+        },
         "strictness_levels": {
             "lenient": {
                 "description": "High recall - catches all products, some false positives",
@@ -585,6 +718,17 @@ def scraper_info():
         }
     }
 
+
+@app.post("/scrape/static", response_model=JobStatus)
+def start_scrape_static(request: ScrapeRequest, background_tasks: BackgroundTasks):
+    """
+    Start Model S (Static) scraping job
+    
+    Force static scraping regardless of page type.
+    Fast but may not work on JavaScript-heavy pages.
+    """
+    request.model = "S"
+    return start_scrape(request, background_tasks)
 
 # ============================================================
 # ENTRY POINT (HF DOCKER)

@@ -449,3 +449,73 @@ class RuleBasedClassifier(DynamicPageClassifier):
     def __init__(self):
         """Initialize with default settings."""
         super().__init__(enable_logging=True)
+
+
+class DynamicClassifier:
+    """
+    Simplified classifier wrapper - Model D routing removed.
+    
+    This classifier now just does standard page classification without
+    dynamic configurator detection. All pages use Model-S (static scraping).
+    """
+    
+    def __init__(self, strictness: str = "balanced"):
+        """
+        Initialize dynamic classifier.
+        
+        Args:
+            strictness: Classification strictness level (unused, kept for compatibility)
+        """
+        self.strictness = strictness
+        self.base_classifier = DynamicPageClassifier(enable_logging=True)
+    
+    def is_product_page(self, url: str, markdown: str) -> bool:
+        """
+        Check if page is a product page.
+        
+        Args:
+            url: Page URL
+            markdown: Page content
+            
+        Returns:
+            True if product page, False otherwise
+        """
+        return self.base_classifier.is_product_page(url, markdown)
+    
+    def classify(self, url: str, markdown: str) -> PageClassification:
+        """
+        Classify page type.
+        
+        Args:
+            url: Page URL
+            markdown: Page content
+            
+        Returns:
+            PageClassification object
+        """
+        return self.base_classifier.classify(url, markdown)
+    
+    def classify_page(self, url: str, markdown: str) -> Dict:
+        """
+        Classify page with simplified output (no Model D routing).
+        
+        Args:
+            url: Page URL
+            markdown: Page content
+            
+        Returns:
+            Dictionary with classification results
+        """
+        # Use base classifier
+        result = self.base_classifier.classify(url, markdown)
+        
+        return {
+            'page_type': result.page_type,
+            'is_product': result.page_type == 'product',
+            'confidence': result.confidence,
+            'model': 'S',  # Always use Model-S
+            'is_dynamic': False,  # No dynamic detection
+            'scores': result.scores,
+            'signals': result.signals,
+            'reasoning': result.reasoning
+        }

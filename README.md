@@ -1,8 +1,8 @@
 ---
-title: Product Catalogue Ai
-emoji: 📈
-colorFrom: red
-colorTo: green
+title: LAM Sales
+emoji: 📚
+colorFrom: pink
+colorTo: purple
 sdk: docker
 pinned: false
 ---

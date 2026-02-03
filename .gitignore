@@ -91,5 +91,15 @@ tools/
 streamlit_app.py
 credentials.json
 .env
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual env (if any)
+.venv/
+venv/
+env/
 readmes/
 graphs/
