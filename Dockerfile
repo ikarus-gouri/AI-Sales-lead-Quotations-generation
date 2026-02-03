@@ -5,7 +5,37 @@ FROM python:3.10-slim
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
+# ----------------------------
+# System deps required by Chromium
+# ----------------------------
+RUN apt-get update && apt-get install -y \
+    wget \
+    curl \
+    gnupg \
+    ca-certificates \
+    libnss3 \
+    libatk-bridge2.0-0 \
+    libxkbcommon0 \
+    libgtk-3-0 \
+    libdrm2 \
+    libgbm1 \
+    libasound2 \
+    libxshmfence1 \
+    libxrandr2 \
+    libxdamage1 \
+    libxcomposite1 \
+    libxfixes3 \
+    libx11-xcb1 \
+    libxcb1 \
+    libxext6 \
+    libx11-6 \
+    fonts-liberation \
+    --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
+# ----------------------------
 # Create non-root user (HF best practice)
+# ----------------------------
 RUN useradd -m -u 1000 user
 USER user
 
@@ -15,11 +45,16 @@ WORKDIR /app
 # Ensure local user installs are available
 ENV PATH="/home/user/.local/bin:$PATH"
 
-# Copy only requirements first (better cache)
+# ----------------------------
+# Install Python deps
+# ----------------------------
 COPY --chown=user requirements.txt .
-
-# Install dependencies
 RUN pip install --user --no-cache-dir -r requirements.txt
+
+# ----------------------------
+# 🔥 Install Playwright browser
+# ----------------------------
+RUN playwright install chromium
 
 # Copy the rest of the project
 COPY --chown=user . .
