@@ -15,7 +15,7 @@ class ConfiguratorDetector:
             'customize', 'personalize', 'design', 'configure', 'build',
             'create', 'make your own', 'start designing', 'start building'
         ]
-         
+        
         self.customization_indicators = [
             'choose', 'select', 'pick', 'add', 'upgrade',
             'option', 'variant', 'color', 'size', 'material'

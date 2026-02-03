@@ -3,6 +3,7 @@
 import os
 import json
 from typing import Dict, List, Optional
+from datetime import datetime
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -63,6 +64,55 @@ class GoogleSheetsStorage:
         except Exception as e:
             print(f"⚠ Failed to authenticate with Google Sheets: {e}")
             self.service = None
+    
+    def _create_new_sheet(self, spreadsheet_id: str, sheet_name: str) -> Optional[int]:
+        """
+        Create a new sheet tab in the spreadsheet.
+        
+        Args:
+            spreadsheet_id: The spreadsheet ID
+            sheet_name: Name for the new sheet tab
+            
+        Returns:
+            Sheet ID or None if failed
+        """
+        if not self.service:
+            return None
+        
+        try:
+            # Check if sheet already exists
+            spreadsheet = self.service.spreadsheets().get(
+                spreadsheetId=spreadsheet_id
+            ).execute()
+            
+            for sheet in spreadsheet.get('sheets', []):
+                if sheet['properties']['title'] == sheet_name:
+                    print(f"ℹ Sheet '{sheet_name}' already exists, will overwrite data")
+                    return sheet['properties']['sheetId']
+            
+            # Create new sheet
+            request_body = {
+                'requests': [{
+                    'addSheet': {
+                        'properties': {
+                            'title': sheet_name
+                        }
+                    }
+                }]
+            }
+            
+            response = self.service.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body=request_body
+            ).execute()
+            
+            sheet_id = response['replies'][0]['addSheet']['properties']['sheetId']
+            print(f"✓ Created new sheet tab: '{sheet_name}'")
+            return sheet_id
+            
+        except HttpError as e:
+            print(f"⚠ Failed to create new sheet: {e}")
+            return None
     
     def create_spreadsheet(self, title: str) -> Optional[str]:
         """
@@ -129,24 +179,17 @@ class GoogleSheetsStorage:
                 all_data.append(header_row)
             all_data.extend(data)
             
-            # Clear existing data
-            try:
-                self.service.spreadsheets().values().clear(
-                    spreadsheetId=spreadsheet_id,
-                    range='Sheet1!A1:Z'
-                ).execute()
-            except HttpError:
-                # Sheet might not exist or might be empty
-                pass
+            # Create a new sheet tab with the specified name
+            self._create_new_sheet(spreadsheet_id, sheet_name)
             
-            # Upload new data
+            # Upload new data to the new sheet
             body = {
                 'values': all_data
             }
             
             result = self.service.spreadsheets().values().update(
                 spreadsheetId=spreadsheet_id,
-                range='Sheet1!A1',
+                range=f'{sheet_name}!A1',
                 valueInputOption='RAW',
                 body=body
             ).execute()
@@ -249,11 +292,103 @@ class GoogleSheetsStorage:
         except HttpError as e:
             print(f"⚠ Failed to format sheet: {e}")
     
+    def apply_color_formatting(
+        self,
+        spreadsheet_id: str,
+        sheet_name: str,
+        color_cell_map: List[tuple]
+    ):
+        """
+        Apply background colors to specific cells based on hex codes.
+        
+        Args:
+            spreadsheet_id: The spreadsheet ID
+            sheet_name: Name of the sheet tab
+            color_cell_map: List of tuples (row_index, col_index, hex_color)
+        """
+        if not self.service or not color_cell_map:
+            return
+        
+        try:
+            # Get sheet ID
+            spreadsheet = self.service.spreadsheets().get(
+                spreadsheetId=spreadsheet_id
+            ).execute()
+            
+            sheet_id = None
+            for sheet in spreadsheet['sheets']:
+                if sheet['properties']['title'] == sheet_name:
+                    sheet_id = sheet['properties']['sheetId']
+                    break
+            
+            if sheet_id is None:
+                return
+            
+            # Build format requests for each color cell
+            requests = []
+            
+            for row_idx, col_idx, hex_color in color_cell_map:
+                # Parse hex color (e.g., "#FF5733")
+                hex_color = hex_color.lstrip('#')
+                if len(hex_color) != 6:
+                    continue
+                
+                try:
+                    r = int(hex_color[0:2], 16) / 255.0
+                    g = int(hex_color[2:4], 16) / 255.0
+                    b = int(hex_color[4:6], 16) / 255.0
+                except:
+                    continue
+                
+                # Determine text color based on background brightness
+                brightness = (r * 299 + g * 587 + b * 114) / 1000
+                text_color = {
+                    'red': 0.0 if brightness > 0.5 else 1.0,
+                    'green': 0.0 if brightness > 0.5 else 1.0,
+                    'blue': 0.0 if brightness > 0.5 else 1.0
+                }
+                
+                requests.append({
+                    'repeatCell': {
+                        'range': {
+                            'sheetId': sheet_id,
+                            'startRowIndex': row_idx,
+                            'endRowIndex': row_idx + 1,
+                            'startColumnIndex': col_idx,
+                            'endColumnIndex': col_idx + 1
+                        },
+                        'cell': {
+                            'userEnteredFormat': {
+                                'backgroundColor': {
+                                    'red': r,
+                                    'green': g,
+                                    'blue': b
+                                },
+                                'textFormat': text_color
+                            }
+                        },
+                        'fields': 'userEnteredFormat(backgroundColor,textFormat)'
+                    }
+                })
+            
+            if requests:
+                body = {'requests': requests}
+                self.service.spreadsheets().batchUpdate(
+                    spreadsheetId=spreadsheet_id,
+                    body=body
+                ).execute()
+                
+                print(f"✓ Applied color formatting to {len(requests)} cells")
+                
+        except HttpError as e:
+            print(f"⚠ Failed to apply color formatting: {e}")
+    
     def save_catalog(
         self,
         catalog: Dict,
         spreadsheet_id: Optional[str] = None,
         title: str = "Product Catalog",
+        sheet_name: Optional[str] = None,
         include_prices: bool = True
     ) -> Optional[str]:
         """
@@ -263,6 +398,7 @@ class GoogleSheetsStorage:
             catalog: The product catalog
             spreadsheet_id: Existing spreadsheet ID (creates new if None, or uses default from env)
             title: Title for new spreadsheet
+            sheet_name: Name for the sheet tab (auto-generated with timestamp if None)
             include_prices: Whether to include prices column
             
         Returns:
@@ -284,6 +420,11 @@ class GoogleSheetsStorage:
             if not spreadsheet_id:
                 return None
         
+        # Generate sheet name with timestamp if not provided
+        if not sheet_name:
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            sheet_name = f"Catalog {timestamp}"
+        
         # Prepare data
         rows = []
         
@@ -298,18 +439,22 @@ class GoogleSheetsStorage:
                     f"Base Model({product_name})",
                     product_name,
                     base_price,
-                    product_url,
-                    ''
+                    '',
+                    '',
+                    product_url
                 ])
             else:
                 rows.append([
                     f"Base Model({product_name})",
                     product_name,
+                    '',
                     product_url
                 ])
 
             # Customization categories
             customizations = product_data.get('customizations', {})
+            color_cell_map = []  # Track which cells need color formatting: [(row, col, hex_color)]
+            
             for category, options in customizations.items():
                 if not options:
                     continue
@@ -320,10 +465,14 @@ class GoogleSheetsStorage:
                         label = option.get('label', str(option))
                         price = option.get('price', '')
                         image = option.get('image', '')
+                        hex_color = option.get('hex_color', '')
                     else:
                         label = str(option)
                         price = ''
                         image = ''
+                        hex_color = ''
+                    
+                    current_row = len(rows) + 1  # +1 for header row
                     
                     if include_prices:
                         rows.append([
@@ -331,25 +480,38 @@ class GoogleSheetsStorage:
                             label,
                             price,
                             image,
-                            f"Category: {category}"
+                            f"Category: {category}",
+                            ''
                         ])
+                        # Track color cell (column B = index 1, 0-indexed)
+                        if hex_color:
+                            color_cell_map.append((current_row, 1, hex_color))
                     else:
                         rows.append([
                             category if i == 0 else '',
                             label,
-                            image
+                            image,
+                            ''
                         ])
+                        if hex_color:
+                            color_cell_map.append((current_row, 1, hex_color))
         
-        # Header row 
-        header = ['Categories', 'Component', 'Price', 'References', 'Notes'] if include_prices else ['Categories', 'Component', 'References']
+        # Header row
+        header = ['Categories', 'Component', 'Price', 'Image', 'Notes', 'References'] if include_prices else ['Categories', 'Component', 'Image', 'References']
         
         # Upload data
-        success = self.upload_data(spreadsheet_id, rows, header_row=header)
+        success = self.upload_data(spreadsheet_id, rows, sheet_name=sheet_name, header_row=header)
         
         if success:
             # Apply formatting
-            self.format_sheet(spreadsheet_id)
+            self.format_sheet(spreadsheet_id, sheet_name=sheet_name)
+            
+            # Apply color formatting to color cells
+            if color_cell_map:
+                self.apply_color_formatting(spreadsheet_id, sheet_name, color_cell_map)
+            
             print(f"\n✓ Catalog uploaded to Google Sheets")
+            print(f"  Sheet: '{sheet_name}'")
             print(f"  URL: https://docs.google.com/spreadsheets/d/{spreadsheet_id}\n")
             return spreadsheet_id
         

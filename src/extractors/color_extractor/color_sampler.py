@@ -18,7 +18,7 @@ class ExtractedColor:
     cluster_size: int  # Number of pixels in cluster
 
 
-class ColorSampler: 
+class ColorSampler:
     """
     Extract dominant colors from swatch images using k-means clustering.
     

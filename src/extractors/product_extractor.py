@@ -12,7 +12,7 @@ class ProductExtractor:
 
     def __init__(
         self,
-        enable_color_extraction: bool = False,
+        enable_color_extraction: bool = True,
         use_llm_naming: bool = False
     ):
         self.enable_color_extraction = enable_color_extraction
@@ -51,6 +51,84 @@ class ProductExtractor:
             return price_match.group(0).replace('Base Price:', '').strip()
         return None
 
+    def extract_specifications(self, markdown: str) -> Dict[str, str]:
+        """
+        Extract product specifications from markdown.
+        
+        Looks for common specification patterns like:
+        - Dimensions: X x Y x Z
+        - Weight: XXX lbs
+        - Material: XXX
+        - Engine: XXX
+        - Length: XX ft
+        - Width: XX ft
+        - Height: XX ft
+        - Capacity: XXX
+        - Power: XXX
+        - etc.
+        
+        Returns:
+            Dictionary of specification key-value pairs
+        """
+        specifications = {}
+        
+        # Common specification patterns
+        spec_patterns = [
+            # Dimensions
+            (r'(?:Dimensions?|Size):\s*([^\n]+)', 'Dimensions'),
+            (r'Length:\s*([^\n]+)', 'Length'),
+            (r'Width:\s*([^\n]+)', 'Width'),
+            (r'Height:\s*([^\n]+)', 'Height'),
+            (r'Depth:\s*([^\n]+)', 'Depth'),
+            
+            # Weight and Capacity
+            (r'Weight:\s*([^\n]+)', 'Weight'),
+            (r'(?:Capacity|Payload):\s*([^\n]+)', 'Capacity'),
+            (r'(?:GVWR|Gross Vehicle Weight Rating):\s*([^\n]+)', 'GVWR'),
+            
+            # Materials and Construction
+            (r'Material:\s*([^\n]+)', 'Material'),
+            (r'Construction:\s*([^\n]+)', 'Construction'),
+            (r'Frame:\s*([^\n]+)', 'Frame'),
+            (r'Body:\s*([^\n]+)', 'Body'),
+            
+            # Engine and Performance
+            (r'Engine:\s*([^\n]+)', 'Engine'),
+            (r'Motor:\s*([^\n]+)', 'Motor'),
+            (r'(?:Horsepower|HP):\s*([^\n]+)', 'Horsepower'),
+            (r'Torque:\s*([^\n]+)', 'Torque'),
+            (r'Transmission:\s*([^\n]+)', 'Transmission'),
+            (r'Fuel:\s*([^\n]+)', 'Fuel'),
+            (r'(?:MPG|Fuel Economy):\s*([^\n]+)', 'Fuel Economy'),
+            
+            # Electrical
+            (r'(?:Voltage|Power):\s*([^\n]+)', 'Power'),
+            (r'Battery:\s*([^\n]+)', 'Battery'),
+            (r'(?:Watts|Wattage):\s*([^\n]+)', 'Wattage'),
+            
+            # Other common specs
+            (r'Model(?:\s+Number)?:\s*([^\n]+)', 'Model Number'),
+            (r'SKU:\s*([^\n]+)', 'SKU'),
+            (r'Brand:\s*([^\n]+)', 'Brand'),
+            (r'Manufacturer:\s*([^\n]+)', 'Manufacturer'),
+            (r'Warranty:\s*([^\n]+)', 'Warranty'),
+            (r'Year:\s*([^\n]+)', 'Year'),
+            (r'Color:\s*([^\n]+)', 'Color'),
+            (r'Finish:\s*([^\n]+)', 'Finish'),
+        ]
+        
+        for pattern, spec_name in spec_patterns:
+            match = re.search(pattern, markdown, re.IGNORECASE | re.MULTILINE)
+            if match:
+                value = match.group(1).strip()
+                # Clean up the value
+                value = re.sub(r'\s+', ' ', value)  # Normalize whitespace
+                value = value.split('|')[0].strip()  # Take first part if pipe-separated
+                if value and len(value) < 200:  # Reasonable length
+                    specifications[spec_name] = value
+        
+        return specifications
+
     # ------------------------------------------------------------------
     # Customizations
     # ------------------------------------------------------------------
@@ -85,6 +163,24 @@ class ProductExtractor:
                     "source_image": color_result.source_image,
                     "colors": color_result.colors,
                 }
+                
+                # Enrich the original options with hex codes
+                colors_by_name = {c.name.lower(): c.hex for c in color_result.colors}
+                
+                for option in customizations.get(category, []):
+                    if isinstance(option, dict):
+                        option_label = option.get('label', '').lower()
+                        # Try to match color by name
+                        for color_name, hex_code in colors_by_name.items():
+                            if color_name in option_label or option_label in color_name:
+                                # Add hex code to reference field
+                                current_ref = option.get('image', '') or option.get('reference', '')
+                                if current_ref:
+                                    option['reference'] = f"{current_ref} | {hex_code}"
+                                else:
+                                    option['reference'] = hex_code
+                                option['hex_color'] = hex_code
+                                break
 
         return customizations
 
@@ -182,7 +278,7 @@ class ProductExtractor:
 
             for opt in options:
                 label = opt['label'].strip()
-                key = label.lower() 
+                key = label.lower()
 
                 if len(label) < 3:
                     continue

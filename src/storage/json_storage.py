@@ -11,4 +11,3 @@ class JSONStorage:
         """Save dictionary as JSON file."""
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
- 

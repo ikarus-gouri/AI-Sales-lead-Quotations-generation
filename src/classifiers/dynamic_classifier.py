@@ -1,65 +1,462 @@
-"""Dynamic classifier for Model-D hybrid routing.
+"""Smart classifier that uses URL patterns FIRST, then content.
 
-This classifier determines whether each page should use:
-    - Model-S: Static extraction (fast, pattern-based)
-    - Model-D: Browser-based extraction (slow, handles JavaScript)
+This fixes the issue where product pages with "related products" sections
+get misclassified as list pages.
 
-Decision Process:
-    1. Run static classification (BalancedClassifier)
-    2. If product page, analyze for dynamic configurator:
-        - Check for JavaScript frameworks
-        - Detect SPA patterns
-        - Look for dynamic pricing signals
-        - **Critical**: Price present + NO static options
-    3. Calculate confidence score:
-        - >= 50%: Route to Model-D (browser)
-        - < 50%: Route to Model-S (static)
-
-Key Signal Weights:
-    - JS framework detected: +25%
-    - SPA patterns: +20%
-    - Dynamic pricing: +25%
-    - Price without static options: +50% (strong signal)
-    - Known platform: +15%
-
-Example:
-    >>> classifier = DynamicClassifier(strictness="balanced")
-    >>> result = classifier.classify_page(url, markdown)
-    >>> print(f"Model: {result['model']}")  # 'S' or 'D'
-    >>> print(f"Confidence: {result['confidence']:.2%}")
+REPLACE: src/classifiers/dynamic_classifier.py
 """
 
-from typing import Dict
-from .balanced_classifier import BalancedClassifier, StrictnessLevel
-from ..dynamic.dynamic_detector import DynamicConfiguratorDetector
+import re
+from typing import Dict, List, Tuple
+from dataclasses import dataclass, field
+from .base_classifier import BaseClassifier
+
+
+@dataclass
+class PageClassification:
+    """Complete page classification result."""
+    
+    page_type: str
+    confidence: float
+    scores: Dict[str, float] = field(default_factory=dict)
+    signals: Dict[str, any] = field(default_factory=dict)
+    reasoning: List[str] = field(default_factory=list)
+    
+    def add_reason(self, reason: str):
+        """Add reasoning step."""
+        self.reasoning.append(reason)
+    
+    def to_dict(self) -> Dict:
+        """Convert to dictionary for logging."""
+        return {
+            'page_type': self.page_type,
+            'confidence': self.confidence,
+            'scores': self.scores,
+            'signals': self.signals,
+            'reasoning': self.reasoning
+        }
+
+
+class DynamicPageClassifier(BaseClassifier):
+    """
+    Smart multi-class page classifier.
+    
+    Strategy:
+    1. Check URL patterns FIRST (high confidence)
+    2. Then validate with content patterns
+    3. Only rely on content if URL is ambiguous
+    
+    This prevents product pages with "related products" from being
+    misclassified as list pages.
+    """
+    
+    def __init__(self, enable_logging: bool = True):
+        """Initialize classifier."""
+        self.enable_logging = enable_logging
+        self.classification_log: List[Dict] = []
+        self._compile_patterns()
+    
+    def _compile_patterns(self):
+        """Compile all detection patterns."""
+        
+        # URL patterns (PRIMARY SIGNALS)
+        self.url_patterns = {
+            'product_strong': [
+                r'/products?/[^/]+/?$',  # /products/item-name
+                r'/items?/[^/]+/?$',      # /items/item-name
+                r'/p/[^/]+/?$',           # /p/item-name
+            ],
+            'list_strong': [
+                r'/collections?/?$',       # /collections or /collection
+                r'/collections?/[^/]+/?$', # /collections/category-name
+                r'/categor(?:y|ies)/?',    # /category or /categories
+                r'/shop/?$',               # /shop
+                r'/all-products?/?',       # /all-products
+                r'/products?/?$',          # /products (no specific item)
+            ],
+            'blog_strong': [
+                r'/blog/',
+                r'/article/',
+                r'/post/',
+                r'/news/',
+            ]
+        }
+        
+        # Content patterns (SECONDARY SIGNALS)
+        self.content_patterns = {
+            'product_link': re.compile(
+                r'\[([^\]]+)\]\((https?://[^)]*(?:/product|/item|/p/)[^)]*)\)',
+                re.IGNORECASE
+            ),
+            'price': re.compile(r'[\$€£¥₹][\d,]+(?:\.\d{2})?'),
+            'price_modifier': re.compile(r'\+\s*[\$€£¥₹][\d,]+(?:\.\d{2})?'),
+            'base_price': re.compile(
+                r'(?:base\s+)?price[:\s]*[\$€£¥₹]?[\d,]+(?:\.\d{2})?',
+                re.IGNORECASE
+            ),
+            'option_category': re.compile(
+                r'^(?:#{2,4}\s+)?([A-Z][^:\n]{2,40}):\s*$',
+                re.MULTILINE
+            ),
+            'pagination': re.compile(
+                r'(?:page\s+\d+|next|previous|showing\s+\d+)',
+                re.IGNORECASE
+            ),
+            'view_details': re.compile(
+                r'(?:view\s+details?|see\s+more|learn\s+more|shop\s+now)',
+                re.IGNORECASE
+            ),
+            'date_published': re.compile(
+                r'(?:published|posted|written)\s+(?:on\s+)?',
+                re.IGNORECASE
+            ),
+        }
+    
+    def is_product_page(self, url: str, markdown: str) -> bool:
+        """Legacy method for backward compatibility."""
+        result = self.classify(url, markdown)
+        
+        if self.enable_logging:
+            self.classification_log.append({
+                'url': url,
+                'result': result.to_dict()
+            })
+        
+        return result.page_type == 'product'
+    
+    def classify(self, url: str, markdown: str) -> PageClassification:
+        """
+        Classify page with URL-first strategy.
+        
+        Args:
+            url: Page URL
+            markdown: Page content
+            
+        Returns:
+            PageClassification
+        """
+        result = PageClassification(
+            page_type='other',
+            confidence=0.0,
+            scores={
+                'product': 0.0,
+                'list': 0.0,
+                'blog': 0.0,
+                'other': 0.0
+            },
+            signals={}
+        )
+        
+        # ================================================================
+        # PHASE 1: URL PATTERN ANALYSIS (PRIMARY)
+        # ================================================================
+        url_classification = self._classify_by_url(url)
+        
+        if url_classification['confidence'] >= 0.8:
+            # High confidence from URL alone - trust it!
+            result.page_type = url_classification['type']
+            result.confidence = url_classification['confidence']
+            result.add_reason(f"Strong URL pattern: {url_classification['pattern']}")
+            result.signals['url_match'] = url_classification['pattern']
+            
+            # Still do quick content validation for sanity check
+            content_validation = self._quick_content_check(markdown, url_classification['type'])
+            if content_validation['confirms']:
+                result.add_reason(f"Content confirms URL classification")
+            else:
+                result.add_reason(f"Warning: Content doesn't strongly confirm URL")
+            
+            return result
+        
+        # ================================================================
+        # PHASE 2: MEDIUM CONFIDENCE URL + CONTENT ANALYSIS
+        # ================================================================
+        if url_classification['confidence'] >= 0.5:
+            # Medium confidence from URL - validate with content
+            result.add_reason(f"Medium URL pattern: {url_classification['pattern']}")
+            
+            # Get detailed content analysis
+            if url_classification['type'] == 'product':
+                score, signals = self._detect_product_page(url, markdown)
+                result.scores['product'] = score
+                result.signals['product'] = signals
+                
+                if score >= 0.3:
+                    result.page_type = 'product'
+                    result.confidence = min(url_classification['confidence'] + score, 1.0)
+                    result.add_reason(f"URL + content confirm product page")
+                    return result
+            
+            elif url_classification['type'] == 'list':
+                score, signals = self._detect_list_page(url, markdown)
+                result.scores['list'] = score
+                result.signals['list'] = signals
+                
+                if score >= 0.3:
+                    result.page_type = 'list'
+                    result.confidence = min(url_classification['confidence'] + score, 1.0)
+                    result.add_reason(f"URL + content confirm list page")
+                    return result
+        
+        # ================================================================
+        # PHASE 3: LOW CONFIDENCE URL - RELY ON CONTENT
+        # ================================================================
+        result.add_reason(f"No strong URL pattern, analyzing content...")
+        
+        # Full content analysis
+        blog_score, blog_signals = self._detect_blog_page(url, markdown)
+        list_score, list_signals = self._detect_list_page(url, markdown)
+        product_score, product_signals = self._detect_product_page(url, markdown)
+        
+        result.scores['blog'] = blog_score
+        result.scores['list'] = list_score
+        result.scores['product'] = product_score
+        result.signals['blog'] = blog_signals
+        result.signals['list'] = list_signals
+        result.signals['product'] = product_signals
+        
+        # Determine winner
+        max_score = max(result.scores.values())
+        
+        if max_score < 0.3:
+            result.page_type = 'other'
+            result.confidence = 0.2
+            result.add_reason("No strong signals detected")
+        elif blog_score == max_score:
+            result.page_type = 'blog'
+            result.confidence = blog_score
+            result.add_reason(f"Blog signals detected")
+        elif list_score == max_score:
+            result.page_type = 'list'
+            result.confidence = list_score
+            result.add_reason(f"List signals detected")
+        elif product_score == max_score:
+            result.page_type = 'product'
+            result.confidence = product_score
+            result.add_reason(f"Product signals detected")
+        
+        return result
+    
+    def _classify_by_url(self, url: str) -> Dict:
+        """
+        Classify based on URL pattern alone.
+        
+        Returns:
+            {
+                'type': 'product'|'list'|'blog'|'unknown',
+                'confidence': 0.0-1.0,
+                'pattern': 'matched_pattern'
+            }
+        """
+        url_lower = url.lower()
+        
+        # Check strong product patterns
+        for pattern in self.url_patterns['product_strong']:
+            if re.search(pattern, url_lower):
+                return {
+                    'type': 'product',
+                    'confidence': 0.9,
+                    'pattern': pattern
+                }
+        
+        # Check strong list patterns
+        for pattern in self.url_patterns['list_strong']:
+            if re.search(pattern, url_lower):
+                return {
+                    'type': 'list',
+                    'confidence': 0.9,
+                    'pattern': pattern
+                }
+        
+        # Check strong blog patterns
+        for pattern in self.url_patterns['blog_strong']:
+            if re.search(pattern, url_lower):
+                return {
+                    'type': 'blog',
+                    'confidence': 0.9,
+                    'pattern': pattern
+                }
+        
+        # No strong pattern
+        return {
+            'type': 'unknown',
+            'confidence': 0.0,
+            'pattern': 'none'
+        }
+    
+    def _quick_content_check(self, markdown: str, expected_type: str) -> Dict:
+        """Quick sanity check that content matches expected type."""
+        
+        if expected_type == 'product':
+            # Check for product indicators
+            has_price = bool(self.content_patterns['price'].search(markdown))
+            has_options = bool(self.content_patterns['option_category'].search(markdown))
+            
+            return {
+                'confirms': has_price or has_options,
+                'signals': {'has_price': has_price, 'has_options': has_options}
+            }
+        
+        elif expected_type == 'list':
+            # Check for list indicators
+            product_links = len(self.content_patterns['product_link'].findall(markdown))
+            has_pagination = bool(self.content_patterns['pagination'].search(markdown))
+            
+            return {
+                'confirms': product_links >= 5 or has_pagination,
+                'signals': {'product_links': product_links, 'has_pagination': has_pagination}
+            }
+        
+        return {'confirms': True, 'signals': {}}
+    
+    def _detect_blog_page(self, url: str, markdown: str) -> Tuple[float, Dict]:
+        """Detect blog pages."""
+        score = 0.0
+        signals = {}
+        
+        if self.content_patterns['date_published'].search(markdown):
+            score += 0.40
+            signals['date_published'] = True
+        
+        blog_keywords = ['author:', 'share this', 'comments', 'tags:']
+        blog_count = sum(1 for kw in blog_keywords if kw in markdown.lower())
+        if blog_count >= 2:
+            score += 0.30
+            signals['blog_keywords'] = blog_count
+        
+        return min(score, 1.0), signals
+    
+    def _detect_list_page(self, url: str, markdown: str) -> Tuple[float, Dict]:
+        """Detect list/collection pages."""
+        score = 0.0
+        signals = {}
+        
+        # Count product links (but be smarter about it)
+        product_links = self.content_patterns['product_link'].findall(markdown)
+        product_link_count = len(product_links)
+        signals['product_links'] = product_link_count
+        
+        # CRITICAL: Only high counts indicate list pages
+        # Product pages might have 5-10 "related products"
+        # List pages have 20+
+        if product_link_count >= 20:
+            score += 0.60
+            signals['many_product_links'] = True
+        elif product_link_count >= 10:
+            score += 0.40
+            signals['multiple_product_links'] = True
+        elif product_link_count >= 5:
+            score += 0.15  # Might just be related products
+        
+        # Pagination is strong signal
+        if self.content_patterns['pagination'].search(markdown):
+            score += 0.25
+            signals['pagination'] = True
+        
+        # Multiple "View Details" buttons
+        view_details_count = len(self.content_patterns['view_details'].findall(markdown))
+        if view_details_count >= 10:
+            score += 0.20
+        elif view_details_count >= 5:
+            score += 0.10
+        
+        return min(score, 1.0), signals
+    
+    def _detect_product_page(self, url: str, markdown: str) -> Tuple[float, Dict]:
+        """Detect individual product pages."""
+        score = 0.0
+        signals = {}
+        
+        # Base price
+        if self.content_patterns['base_price'].search(markdown):
+            score += 0.30
+            signals['base_price'] = True
+        
+        # Price modifiers (customization)
+        price_modifiers = self.content_patterns['price_modifier'].findall(markdown)
+        if len(price_modifiers) >= 3:
+            score += 0.25
+            signals['price_modifiers'] = len(price_modifiers)
+        
+        # Option categories
+        option_categories = self.content_patterns['option_category'].findall(markdown)
+        if len(option_categories) >= 2:
+            score += 0.30
+            signals['option_categories'] = len(option_categories)
+        
+        # Product keywords
+        product_keywords = ['specifications', 'dimensions', 'features', 'description']
+        product_count = sum(1 for kw in product_keywords if kw in markdown.lower())
+        if product_count >= 2:
+            score += 0.15
+            signals['product_keywords'] = product_count
+        
+        return min(score, 1.0), signals
+    
+    def get_classification_log(self) -> List[Dict]:
+        """Get all classification decisions."""
+        return self.classification_log
+    
+    def save_classification_log(self, filepath: str):
+        """Save classification log to JSON file."""
+        import json
+        
+        with open(filepath, 'w') as f:
+            json.dump(self.classification_log, f, indent=2)
+        
+        print(f"✓ Classification log saved: {filepath}")
+    
+    def print_statistics(self):
+        """Print classification statistics."""
+        if not self.classification_log:
+            print("No classifications logged yet.")
+            return
+        
+        total = len(self.classification_log)
+        
+        type_counts = {}
+        for log in self.classification_log:
+            ptype = log['result']['page_type']
+            type_counts[ptype] = type_counts.get(ptype, 0) + 1
+        
+        type_confidences = {}
+        for ptype in type_counts:
+            confidences = [
+                log['result']['confidence']
+                for log in self.classification_log
+                if log['result']['page_type'] == ptype
+            ]
+            type_confidences[ptype] = sum(confidences) / len(confidences)
+        
+        print(f"\n{'='*80}")
+        print("CLASSIFICATION STATISTICS")
+        print(f"{'='*80}")
+        print(f"Total pages classified: {total}")
+        print(f"\nPage Type Distribution:")
+        for ptype in ['product', 'list', 'blog', 'other']:
+            if ptype in type_counts:
+                count = type_counts[ptype]
+                pct = count / total * 100
+                avg_conf = type_confidences[ptype]
+                print(f"  {ptype.upper()}: {count} ({pct:.1f}%) - avg confidence: {avg_conf:.0%}")
+        print(f"{'='*80}\n")
+
+
+# Backward compatibility
+class RuleBasedClassifier(DynamicPageClassifier):
+    """Backward-compatible wrapper."""
+    
+    def __init__(self):
+        """Initialize with default settings."""
+        super().__init__(enable_logging=True)
 
 
 class DynamicClassifier:
-    """Hybrid classifier for automatic Model-S/Model-D routing.
+    """
+    Simplified classifier wrapper - Model D routing removed.
     
-    This classifier wraps BalancedClassifier and DynamicConfiguratorDetector
-    to intelligently route each product page to the appropriate extraction method.
-    
-    Decision flow:
-        1. Run static classification (BalancedClassifier)
-        2. If product page, check if dynamic configurator (DynamicConfiguratorDetector)
-        3. If confidence >= 50%: Route to Model-D (browser-based)
-        4. Otherwise: Route to Model-S (static extraction)
-    
-    Attributes:
-        static_classifier: BalancedClassifier for initial page classification
-        dynamic_detector: DynamicConfiguratorDetector for JS configurator detection
-        strictness: StrictnessLevel enum exposed for compatibility
-    
-    Example:
-        >>> classifier = DynamicClassifier(strictness="balanced")
-        >>> classification = classifier.classify_page(url, markdown)
-        >>> if classification['model'] == 'D':
-        ...     # Use browser-based extraction
-        ...     pass
-        >>> else:
-        ...     # Use static extraction
-        ...     pass
+    This classifier now just does standard page classification without
+    dynamic configurator detection. All pages use Model-S (static scraping).
     """
     
     def __init__(self, strictness: str = "balanced"):
@@ -67,126 +464,58 @@ class DynamicClassifier:
         Initialize dynamic classifier.
         
         Args:
-            strictness: Strictness level for static classification
-                       ('lenient', 'balanced', 'strict')
+            strictness: Classification strictness level (unused, kept for compatibility)
         """
-        # Convert string to enum for BalancedClassifier
-        strictness_map = {
-            "lenient": StrictnessLevel.LENIENT,
-            "balanced": StrictnessLevel.BALANCED,
-            "strict": StrictnessLevel.STRICT
-        }
-        strictness_level = strictness_map.get(strictness.lower(), StrictnessLevel.BALANCED)
-        
-        self.static_classifier = BalancedClassifier(strictness=strictness_level)
-        self.dynamic_detector = DynamicConfiguratorDetector()
-        # Expose the strictness enum from static_classifier for compatibility
-        self.strictness = self.static_classifier.strictness
-        
-        print(f"\033[32m[✓]\033[0m Dynamic Classifier initialized (strictness={strictness})")
-    
-    def classify_page(
-        self,
-        url: str,
-        markdown: str,
-        html_snippet: str = ""
-    ) -> Dict:
-        """
-        Classify page and determine extraction model.
-        
-        Returns:
-        {
-            'page_type': 'product' | 'category' | 'blog' | 'other',
-            'is_product': bool,
-            'model': 'S' | 'D',
-            'confidence': float,
-            'extraction_strategy': 'static' | 'dynamic_browser',
-            'static_classification': {...},
-            'dynamic_detection': {...}
-        }
-        """
-        # Step 1: Static classification
-        # Use classify() method which returns Classification object
-        static_classification = self.static_classifier.classify(url, markdown)
-        
-        # Convert Classification object to dict, handling enums properly
-        page_type = static_classification.page_type
-        if hasattr(page_type, 'value'):
-            # It's an enum - extract string value
-            page_type = page_type.value
-        
-        static_result = {
-            'page_type': page_type,
-            'is_product': static_classification.is_product,
-            'confidence': static_classification.confidence,
-            'signals': static_classification.signals if hasattr(static_classification, 'signals') else {},
-            'reasons': static_classification.reasons if hasattr(static_classification, 'reasons') else []
-        }
-        
-        result = {
-            'page_type': page_type,
-            'is_product': static_result['is_product'],
-            'model': 'S',  # Default to static
-            'confidence': static_result['confidence'],
-            'extraction_strategy': 'static',
-            'static_classification': static_result,
-            'dynamic_detection': None
-        }
-        
-        # If not a product page, no need to check for dynamic
-        if not static_result['is_product']:
-            return result
-        
-        # Step 2: Check if dynamic configurator
-        dynamic_detection = self.dynamic_detector.is_dynamic_configurator(
-            url, markdown, html_snippet
-        )
-        
-        result['dynamic_detection'] = dynamic_detection
-        
-        # Step 3: Route decision
-        if dynamic_detection['is_dynamic']:
-            result['model'] = 'D'
-            result['extraction_strategy'] = 'dynamic_browser'
-            result['confidence'] = dynamic_detection['confidence']
-            
-            print(f"  \033[36m[D]\033[0m Model-D selected (dynamic configurator)")
-            print(f"     Confidence: {dynamic_detection['confidence']:.2%}")
-            print(f"     Reasons: {', '.join(dynamic_detection['reasons'])}")
-        else:
-            result['model'] = 'S'
-            result['extraction_strategy'] = 'static'
-            
-            print(f"  \033[34m[S]\033[0m Model-S selected (static scraping)")
-        
-        return result
+        self.strictness = strictness
+        self.base_classifier = DynamicPageClassifier(enable_logging=True)
     
     def is_product_page(self, url: str, markdown: str) -> bool:
         """
-        Simplified method matching BalancedClassifier interface.
+        Check if page is a product page.
         
+        Args:
+            url: Page URL
+            markdown: Page content
+            
         Returns:
-            True if product page (regardless of model)
+            True if product page, False otherwise
         """
-        result = self.classify_page(url, markdown)
-        return result['is_product']
+        return self.base_classifier.is_product_page(url, markdown)
     
-    def should_use_browser(self, url: str, markdown: str, html_snippet: str = "") -> bool:
+    def classify(self, url: str, markdown: str) -> PageClassification:
         """
-        Determine if browser execution is needed.
+        Classify page type.
         
+        Args:
+            url: Page URL
+            markdown: Page content
+            
         Returns:
-            True if Model-D should be used
+            PageClassification object
         """
-        result = self.classify_page(url, markdown, html_snippet)
-        return result['model'] == 'D'
+        return self.base_classifier.classify(url, markdown)
     
-    def get_extraction_strategy(self, url: str, markdown: str) -> str:
+    def classify_page(self, url: str, markdown: str) -> Dict:
         """
-        Get extraction strategy for this page.
+        Classify page with simplified output (no Model D routing).
         
+        Args:
+            url: Page URL
+            markdown: Page content
+            
         Returns:
-            'static' or 'dynamic_browser'
+            Dictionary with classification results
         """
-        result = self.classify_page(url, markdown)
-        return result['extraction_strategy']
+        # Use base classifier
+        result = self.base_classifier.classify(url, markdown)
+        
+        return {
+            'page_type': result.page_type,
+            'is_product': result.page_type == 'product',
+            'confidence': result.confidence,
+            'model': 'S',  # Always use Model-S
+            'is_dynamic': False,  # No dynamic detection
+            'scores': result.scores,
+            'signals': result.signals,
+            'reasoning': result.reasoning
+        }

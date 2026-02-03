@@ -94,8 +94,8 @@ class BalancedClassifier:
         
         # Blog/article indicators (from strict approach)
         self.blog_keywords = [
-            'posted on', 'author:', 'written by',
-            'read more', 'share this',
+            'published', 'posted on', 'author:', 'written by',
+            'tags:', 'categories:', 'read more', 'share this',
             'continue reading', 'related posts', 'comments',
             'blog post', 'article by'
         ]

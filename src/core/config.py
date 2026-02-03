@@ -1,32 +1,26 @@
-"""Configuration management for the scraper.
-
-This module handles all configuration settings for both Model-S (static) and
-Model-D (dynamic) scrapers. Configuration can be set via:
-    - Command-line arguments (main.py)
-    - Environment variables (.env file)
-    - Programmatic defaults
-"""
+"""Configuration management for the scraper."""
 
 import os
 from dataclasses import dataclass
 from typing import Optional
-from dotenv import load_dotenv
 
-load_dotenv()
+# Try to load dotenv if available
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    # dotenv not installed, just use environment variables
+    pass
 
 
 @dataclass
 class ScraperConfig:
-    """Configuration for the web scraper.
-    
-    This dataclass holds all settings for crawling, scraping, and storage.
-    Settings are automatically loaded from environment variables in __post_init__.
-    """
+    """Configuration for the web scraper."""
     
     # Target website
     base_url: str = "https://casarista.com/"
     
-    # Crawling settings 
+    # Crawling settings
     max_pages: int = 50
     max_depth: int = 3
     crawl_delay: float = 0.5  # seconds between requests

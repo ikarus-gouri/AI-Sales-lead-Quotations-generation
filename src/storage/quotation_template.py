@@ -8,7 +8,7 @@ class QuotationTemplate:
     @staticmethod
     def to_json_string(catalog: Dict) -> str:
         template = {
-            "instructions": "Select options to gen erate quotations",
+            "instructions": "Select options to generate quotations",
             "products": {}
         }
 

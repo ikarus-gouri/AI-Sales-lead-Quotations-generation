@@ -19,7 +19,7 @@ class ColorNormalizer:
     """
     Normalize extracted colors and map to human-friendly names.
     
-    Two-stage approach: 
+    Two-stage approach:
     1. Rule-based mapping for common colors (fast, deterministic)
     2. LLM-assisted naming for complex/uncommon colors (slower, as needed)
     """

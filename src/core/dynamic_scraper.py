@@ -1,39 +1,25 @@
-"""Model-D: Hybrid scraper with automatic static/dynamic routing.
+"""Model-D: Simplified static scraper (Browser-based Model D removed).
 
-This scraper intelligently routes each page to either Model-S (static) or
-Model-D (browser-based) extraction based on dynamic configurator detection.
+This scraper now only uses static scraping (Model-S approach) for all pages.
+The dynamic/browser-based routing has been removed for simplicity.
 
 Features:
-    - Automatic per-page routing (S or D)
-    - Browser automation with Playwright
-    - JavaScript configurator handling
-    - Interactive control discovery
-    - Network activity monitoring
-    - Price learning from user interactions
-    - Fallback to Model-S on browser failures
-
-Detection Criteria (for Model-D):
-    - JavaScript framework detected (React, Vue, Angular)
-    - SPA indicators (single-page app)
-    - Dynamic pricing signals
-    - Price present but NO static options (confidence: 50%)
-    - Known e-commerce platforms
+    - Static scraping for all product pages
+    - Enhanced page classification
+    - Configurator detection (static analysis)
+    - Export to multiple formats
 
 Workflow:
     1. Crawl website with DynamicClassifier
     2. For each product page:
-        a. Detect if dynamic configurator (DynamicConfiguratorDetector)
-        b. If confidence >= 50%: Use Model-D (browser)
-        c. Otherwise: Use Model-S (static)
-    3. Extract product data using appropriate method
+        - Use Model-S (static extraction)
+    3. Extract product data using static methods
     4. Export to multiple formats
 
 Usage:
     scraper = DynamicScraper(
         config,
-        strictness="balanced",
-        enable_browser=True,
-        headless=True
+        strictness="balanced"
     )
     catalog = scraper.scrape_all_products()
     scraper.save_catalog(catalog, export_formats=['json'])
@@ -51,7 +37,6 @@ from ..extractors.external_configurator_scraper import ExternalConfiguratorScrap
 from ..classifiers.dynamic_classifier import DynamicClassifier
 from ..classifiers.balanced_classifier import StrictnessLevel
 from ..crawlers.web_crawler import WebCrawler
-from ..dynamic.browser_engine import BrowserRunner, BrowserConfig
 from ..storage.json_storage import JSONStorage
 from ..storage.csv_storage import CSVStorage
 from ..storage.google_sheets import GoogleSheetsStorage
@@ -59,36 +44,25 @@ from ..storage.quotation_template import QuotationTemplate
 
 
 class DynamicScraper:
-    """Model-D: Hybrid scraper with automatic static/dynamic routing.
+    """Model-D: Simplified static scraper (Browser-based routing removed).
     
-    This scraper uses DynamicClassifier to intelligently route each page
-    to either Model-S (static) or Model-D (browser) extraction based on
-    dynamic configurator detection.
+    This scraper now only uses static extraction (Model-S) for all pages.
+    The browser-based Model D routing has been removed for simplicity.
     
     Workflow:
         1. Crawl pages using enhanced web crawler
-        2. Classify with DynamicClassifier (routes to Model-S or Model-D)
-        3. Extract using appropriate method:
-           - Model-S: Static extraction (ProductExtractor)
-           - Model-D: Browser execution (BrowserRunner)
-        4. Merge results into unified catalog
+        2. Classify with DynamicClassifier
+        3. Extract using static method (ProductExtractor)
+        4. Export to unified catalog
     
     Attributes:
-        config: ScraperConfig with crawl and browser settings
-        classifier: DynamicClassifier for hybrid routing
-        crawler: WebCrawler with dynamic classification
-        browser_config: BrowserConfig for Playwright settings
-        enable_browser: Whether Model-D is available (requires Playwright)
-        headless: Whether to run browser in headless mode
+        config: ScraperConfig with crawl settings
+        classifier: DynamicClassifier for page classification
+        crawler: WebCrawler with classification
     
     Example:
         >>> config = ScraperConfig(base_url="https://example.com")
-        >>> scraper = DynamicScraper(
-        ...     config,
-        ...     strictness="balanced",
-        ...     enable_browser=True,
-        ...     headless=True
-        ... )
+        >>> scraper = DynamicScraper(config, strictness="balanced")
         >>> catalog = scraper.scrape_all_products()
         >>> scraper.save_catalog(catalog, export_formats=['json'])
     """
@@ -97,8 +71,8 @@ class DynamicScraper:
         self,
         config: ScraperConfig,
         strictness: str = "balanced",
-        enable_browser: bool = True,
-        headless: bool = True
+        enable_browser: bool = False,  # Deprecated, kept for compatibility
+        headless: bool = True  # Deprecated, kept for compatibility
     ):
         """
         Initialize dynamic scraper.
@@ -106,12 +80,12 @@ class DynamicScraper:
         Args:
             config: Scraper configuration
             strictness: Classification strictness ('lenient', 'balanced', 'strict')
-            enable_browser: Enable Model-D (if False, falls back to Model-S only)
-            headless: Run browser in headless mode (default: True)
+            enable_browser: Deprecated (Model D removed)
+            headless: Deprecated (Model D removed)
         """
         self.config = config
         self.strictness = strictness
-        self.enable_browser = enable_browser
+        self.enable_browser = False  # Always disabled now
         self.headless = headless
         
         # Map strictness string to enum for consistency
@@ -140,18 +114,11 @@ class DynamicScraper:
             base_url=config.base_url,
             http_client=self.http_client,
             link_extractor=self.link_extractor,
-            classifier=self.classifier,  # Uses dynamic classifier for routing
+            classifier=self.classifier,
             crawl_delay=config.crawl_delay
         )
         
-        # Browser config for Model-D
-        self.browser_config = BrowserConfig(
-            headless=self.headless,
-            timeout=60000,  # 60 seconds for slow-loading pages
-            wait_after_action=1000
-        )
-        
-        # Initialize storage (same as BalancedScraper)
+        # Initialize storage
         self.json_storage = JSONStorage()
         self.csv_storage = CSVStorage()
         self.quotation_template = QuotationTemplate()
@@ -162,49 +129,17 @@ class DynamicScraper:
             'total_pages_crawled': 0,
             'product_pages_found': 0,
             'static_extractions': 0,
-            'dynamic_extractions': 0,
             'failed_extractions': 0,
-            'model_s_count': 0,
-            'model_d_count': 0
         }
         
         print(f"\033[32m[✓]\033[0m Dynamic Scraper initialized")
-        print(f"  Mode: {'Hybrid (Model-S + Model-D)' if enable_browser else 'Static Only (Model-S)'}")
+        print(f"  Mode: Static Only (Model-S)")
         print(f"  Strictness: {strictness}")
         print(f"  Max pages: {config.max_pages}")
     
-    def _transform_options_to_customizations(self, options_discovered: List[Dict]) -> Dict:
-        """
-        Transform Model-D options_discovered to Model-S customizations format.
-        
-        Args:
-            options_discovered: List of discovered options from browser automation
-            
-        Returns:
-            Dictionary with categorized options matching Model-S format
-        """
-        customizations = {}
-        
-        for option in options_discovered:
-            # Get group name (category)
-            group = option.get('group', 'Options')
-            
-            if group not in customizations:
-                customizations[group] = []
-            
-            # Transform to Model-S format
-            customizations[group].append({
-                'name': option.get('label', 'Unknown'),
-                'price_delta': option.get('price_delta', 0.0),
-                'available': True,
-                'type': option.get('type', 'unknown')
-            })
-        
-        return customizations
-    
     async def scrape_product(self, url: str, markdown: str = None) -> Optional[Dict]:
         """
-        Scrape a single product page with hybrid Model-S/Model-D approach.
+        Scrape a single product page using static extraction only.
         
         Args:
             url: The product page URL
@@ -233,31 +168,20 @@ class DynamicScraper:
         # Log classification
         print(f"  \033[34m[INFO]\033[0m Classification:")
         print(f"     Type: {classification['page_type'].upper()}")
-        print(f"     Model: {classification['model']}")
+        print(f"     Model: S (Static)")
         print(f"     Confidence: {classification['confidence']:.0%}")
         
-        # Route to appropriate extraction method
-        model = classification['model']
-        
-        if model == 'D' and self.enable_browser:
-            # Model-D: Browser-based extraction (await the async call)
-            product_data = await self._extract_dynamic(url, markdown, classification)
-            if product_data:
-                self.stats['dynamic_extractions'] += 1
-                self.stats['model_d_count'] += 1
+        # Always use Model-S: Static extraction
+        product_data = self._extract_static(url, markdown, classification)
+        if product_data:
+            self.stats['static_extractions'] += 1
         else:
-            # Model-S: Static extraction
-            product_data = self._extract_static(url, markdown, classification)
-            if product_data:
-                self.stats['static_extractions'] += 1
-                self.stats['model_s_count'] += 1
+            self.stats['failed_extractions'] += 1
         
         if product_data:
             # Add classification metadata
             product_data['classification'] = classification
-            product_data['model'] = model
-        else:
-            self.stats['failed_extractions'] += 1
+            product_data['model'] = 'S'
         
         return product_data
     
@@ -282,6 +206,7 @@ class DynamicScraper:
             # Extract basic info
             product_name = self.product_extractor.extract_product_name(url, markdown)
             base_price = self.product_extractor.extract_base_price(markdown)
+            specifications = self.product_extractor.extract_specifications(markdown)
             
             # Determine if should scrape customizations
             should_scrape, reason = self.configurator_detector.should_scrape_configurator(configurator_info)
@@ -338,6 +263,7 @@ class DynamicScraper:
                 'product_name': product_name,
                 'url': url,
                 'base_price': base_price,
+                'specifications': specifications,
                 'extraction_method': 'static',
                 'model': 'S',
                 
@@ -360,6 +286,7 @@ class DynamicScraper:
             print(f"     Name: {product_name}")
             print(f"     Model: S")
             print(f"     Price: {base_price or 'None'}")
+            print(f"     Specifications: {len(specifications)}")
             print(f"\n")
             
             return product_data
@@ -368,70 +295,9 @@ class DynamicScraper:
             print(f"  \033[31m[x]\033[0m Static extraction failed: {e}")
             return None
     
-    async def _extract_dynamic(self, url: str, markdown: str, classification: Dict) -> Optional[Dict]:
-        """Extract product data using Model-D (browser-based)."""
-        try:
-            print(f"  \033[36m[D]\033[0m Using Model-D (browser-based extraction)")
-            
-            # Initialize browser runner
-            runner = BrowserRunner(self.browser_config)
-            
-            # Run dynamic extraction
-            result = await runner.extract_dynamic_configurator(url)
-            
-            if not result['success']:
-                print(f"  \033[31m[x]\033[0m Dynamic extraction failed: {result.get('error')}")
-                print(f"  \u21bb Falling back to Model-S")
-                # Fallback to static
-                return self._extract_static(url, markdown, classification)
-            
-            # Extract basic info from markdown (fallback)
-            product_name = self.product_extractor.extract_product_name(url, markdown)
-            
-            # Transform options_discovered to customizations format (compatible with Model-S)
-            customizations = self._transform_options_to_customizations(result['options_discovered'])
-            
-            # Build product data
-            product_data = {
-                'product_name': product_name,
-                'url': url,
-                'base_price': result['pricing_model'].get('base_price'),
-                'extraction_method': 'dynamic_browser',
-                'model': 'D',
-                
-                # Model-D specific data
-                'pricing_model': result['pricing_model'],
-                'options_discovered': result['options_discovered'],
-                'network_activity': result['network_activity'][:10],  # Limit
-                
-                # Compatibility fields (match Model-S format)
-                'has_configurator': True,
-                'configurator_type': 'dynamic',
-                'configurator_url': None,
-                'configurator_confidence': 1.0,
-                'external_platform': None,
-                'customization_source': 'dynamic_browser',
-                'customization_categories': list(customizations.keys()),
-                'customizations': customizations,
-                'total_customization_options': len(result['options_discovered'])
-            }
-            
-            print(f"  ✓ Model-D extraction complete")
-            print(f"    Name: {product_name}")
-            print(f"    Base price: ${result['pricing_model'].get('base_price', 'N/A')}")
-            print(f"    Options: {len(result['options_discovered'])}")
-            print(f"    Categories: {len(customizations)}")
-            
-            return product_data
-        
-        except Exception as e:
-            print(f"  \033[31m[x]\033[0m Dynamic extraction failed: {e}")
-            print(f"  \u21bb Falling back to Model-S")
-            return self._extract_static(url, markdown, classification)
-    
     async def scrape_all_products(self) -> Dict:
         """
-        Main method: crawl website and scrape all products using hybrid approach.
+        Main method: crawl website and scrape all products using static extraction.
         
         Returns:
             Complete product catalog
@@ -440,7 +306,7 @@ class DynamicScraper:
         print("DYNAMIC SCRAPER (MODEL-D)")
         print(f"{'='*80}")
         print(f"Target: {self.config.base_url}")
-        print(f"Strategy: {'Hybrid (Model-S + Model-D)' if self.enable_browser else 'Static Only (Model-S)'}")
+        print(f"Strategy: Static Only (Model-S)")
         print(f"Strictness: {self.strictness}")
         print(f"{'='*80}\n")
         
@@ -542,13 +408,12 @@ class DynamicScraper:
         """Print scraping statistics."""
         print(f"\n\033[36m[STATS]\033[0m Statistics:")
         print(f"   Product pages found: {self.stats['product_pages_found']}")
-        print(f"   Model-S extractions: {self.stats['static_extractions']}")
-        print(f"   Model-D extractions: {self.stats['dynamic_extractions']}")
+        print(f"   Static extractions: {self.stats['static_extractions']}")
         print(f"   Failed extractions: {self.stats['failed_extractions']}")
         
         if self.stats['product_pages_found'] > 0:
             success_rate = (
-                (self.stats['static_extractions'] + self.stats['dynamic_extractions'])
+                self.stats['static_extractions']
                 / self.stats['product_pages_found'] * 100
             )
             print(f"   Success rate: {success_rate:.1f}%")
@@ -560,26 +425,14 @@ class DynamicScraper:
         print(f"{'='*80}")
         print(f"Total products: {len(catalog)}")
         
-        model_s = sum(1 for p in catalog.values() if p.get('model') == 'S')
-        model_d = sum(1 for p in catalog.values() if p.get('model') == 'D')
-        
-        print(f"  Model-S (static): {model_s}")
-        print(f"  Model-D (dynamic): {model_d}")
-        
         # Detailed breakdown
         for product_id, data in catalog.items():
             print(f"\n {data['product_name']}")
             print(f"   URL: {data['url']}")
-            print(f"   Model: {data['model']}")
+            print(f"   Model: S")
             print(f"   Price: {data.get('base_price', 'N/A')}")
             print(f"   Extraction: {data.get('extraction_method', 'N/A')}")
-            
-            if data.get('model') == 'S':
-                print(f"   Configurator: {data.get('configurator_type', 'none')}")
-                print(f"   Options: {data.get('total_customization_options', 0)}")
-            elif data.get('model') == 'D':
-                pm = data.get('pricing_model', {})
-                print(f"   Options discovered: {len(data.get('options_discovered', []))}")
-                print(f"   Price deltas: {len(pm.get('option_deltas', {}))}")
+            print(f"   Configurator: {data.get('configurator_type', 'none')}")
+            print(f"   Options: {data.get('total_customization_options', 0)}")
         
         print(f"{'='*80}\n")

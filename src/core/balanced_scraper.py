@@ -1,27 +1,4 @@
-"""Model-S: Static extraction scraper with balanced classification.
-
-This is the fast, efficient extraction model that uses Jina AI markdown conversion
-and pattern matching to extract product information without browser automation.
-
-Features:
-    - Fast extraction using HTTP requests only
-    - Balanced classification (lenient + strict combined)
-    - Configurable strictness levels
-    - External configurator support
-    - Multiple export formats
-
-Workflow:
-    1. Crawl website to discover product pages
-    2. Classify pages using BalancedClassifier
-    3. Extract product data from markdown
-    4. Detect and handle configurators (embedded/external)
-    5. Export to multiple formats (JSON, CSV, etc.)
-
-Usage:
-    scraper = BalancedScraper(config, strictness="balanced")
-    catalog = scraper.scrape_all_products()
-    scraper.save_catalog(catalog, export_formats=['json', 'csv'])
-"""
+"""Main scraper with balanced classification (lenient + strict combined)."""
 # src/core/balanced_scraper.py
 import time
 from typing import Dict, Optional
@@ -40,25 +17,11 @@ from ..storage.quotation_template import QuotationTemplate
 
 
 class BalancedScraper:
-    """Model-S: Static extraction scraper.
+    """
+    Main scraper with balanced classification.
     
-    This is the fast, efficient extraction model that operates without
-    browser automation. It uses Jina AI markdown conversion and pattern
-    matching to extract product information.
-    
-    Attributes:
-        config: ScraperConfig with crawl and export settings
-        classifier: BalancedClassifier for page classification
-        crawler: WebCrawler for page discovery
-        product_extractor: ProductExtractor for data extraction
-        configurator_detector: ConfiguratorDetector for configurator detection
-        external_scraper: ExternalConfiguratorScraper for external platforms
-    
-    Example:
-        >>> config = ScraperConfig(base_url="https://example.com")
-        >>> scraper = BalancedScraper(config, strictness="balanced")
-        >>> catalog = scraper.scrape_all_products()
-        >>> scraper.save_catalog(catalog, export_formats=['json', 'csv'])
+    Combines lenient and strict approaches for optimal results.
+    Configurable strictness: LENIENT, BALANCED, or STRICT.
     """
     
     def __init__(self, config: ScraperConfig, strictness: str = "balanced"):
@@ -121,9 +84,9 @@ class BalancedScraper:
         Returns:
             Product data dictionary or None
         """
-        print(f"\n{'-'*80}")
+        print(f"\n{'─'*80}")
         print(f"Scraping product: {url}")
-        print(f"{'-'*80}")
+        print(f"{'─'*80}")
         
         # Scrape the page
         markdown = self.http_client.scrape_with_jina(url)
@@ -135,7 +98,7 @@ class BalancedScraper:
         classification = self.classifier.classify(url, markdown)
         
         if not classification.is_product:
-            print(f"  \033[33m[WARN]\033[0m Page reclassified as {classification.page_type}")
+            print(f"  ⚠️  Page reclassified as {classification.page_type}")
             print(f"     Confidence: {classification.confidence:.0%}")
             print(f"     Reasons: {', '.join(classification.reasons[:2])}")
             return None
@@ -164,6 +127,7 @@ class BalancedScraper:
         # Extract basic product information
         product_name = self.product_extractor.extract_product_name(url, markdown)
         base_price = self.product_extractor.extract_base_price(markdown)
+        specifications = self.product_extractor.extract_specifications(markdown)
         
         customizations = {}
         scrape_source = "none"
@@ -221,6 +185,7 @@ class BalancedScraper:
             "product_name": product_name,
             "url": url,
             "base_price": base_price,
+            "specifications": specifications,
             
             # Classification metadata
             "classification_confidence": classification.confidence,
@@ -245,9 +210,10 @@ class BalancedScraper:
         }
         
         # Print summary
-        print(f"\n   Product Summary:")
+        print(f"\n  📦 Product Summary:")
         print(f"     Name: {product_name}")
         print(f"     Price: {base_price or 'Not found'}")
+        print(f"     Specifications: {len(specifications)}")
         print(f"     Categories: {len(customizations)}")
         print(f"     Total Options: {product_data['total_customization_options']}")
         
@@ -274,7 +240,7 @@ class BalancedScraper:
         )
         
         if not product_urls:
-            print("\n\033[33m[WARN]\033[0m No product pages found!")
+            print("\n⚠️  No product pages found!")
             return {}
         
         # Step 2: Scrape each product
@@ -347,43 +313,65 @@ class BalancedScraper:
         print("CATALOG SUMMARY")
         print("="*80 + "\n")
         
-        total_products = len(catalog)
-        total_with_configurator = sum(1 for p in catalog.values() if p['has_configurator'])
-        total_embedded = sum(1 for p in catalog.values() if p['configurator_type'] == 'embedded')
-        total_external = sum(1 for p in catalog.values() if p['configurator_type'] == 'external')
-        total_categories = sum(len(p['customization_categories']) for p in catalog.values())
-        total_options = sum(p['total_customization_options'] for p in catalog.values())
+        # Handle both dict format (product_name: data) and list format (products: [...])
+        if isinstance(catalog, dict) and 'products' in catalog:
+            # New format from LAM
+            products = catalog['products']
+        else:
+            # Old format (dict of product_name: data)
+            products = list(catalog.values()) if isinstance(catalog, dict) else []
         
-        # Classification stats
-        avg_confidence = sum(p['classification_confidence'] for p in catalog.values()) / total_products if total_products > 0 else 0
-        avg_score = sum(p['classification_score'] for p in catalog.values()) / total_products if total_products > 0 else 0
+        total_products = len(products)
+        if total_products == 0:
+            print("No products found.")
+            return
+        
+        total_with_configurator = sum(1 for p in products if p.get('has_configurator'))
+        total_embedded = sum(1 for p in products if p.get('configurator_type') == 'embedded')
+        total_external = sum(1 for p in products if p.get('configurator_type') == 'external')
+        total_categories = sum(len(p.get('customization_categories', [])) for p in products)
+        total_options = sum(p.get('total_customization_options', 0) for p in products)
+        
+        # Classification stats (may not exist in LAM format)
+        avg_confidence = sum(p.get('classification_confidence', 0) for p in products) / total_products if total_products > 0 else 0
+        avg_score = sum(p.get('classification_score', 0) for p in products) / total_products if total_products > 0 else 0
         
         print(f"📊 Overview:")
         print(f"   Total Products: {total_products}")
-        print(f"   Avg Classification Confidence: {avg_confidence:.0%}")
-        print(f"   Avg Classification Score: {avg_score:.1f}")
+        if avg_confidence > 0:
+            print(f"   Avg Classification Confidence: {avg_confidence:.0%}")
+        if avg_score > 0:
+            print(f"   Avg Classification Score: {avg_score:.1f}")
         print(f"   Products with Configurator: {total_with_configurator}")
         print(f"     → Embedded: {total_embedded}")
         print(f"     → External: {total_external}")
         print(f"   Total Customization Categories: {total_categories}")
         print(f"   Total Customization Options: {total_options}\n")
         
-        print(f"{'-'*80}\n")
+        print(f"{'─'*80}\n")
         
-        for product_id, data in catalog.items():
-            print(f"\033[35m[PRODUCT]\033[0m {data['product_name']}")
-            print(f"   URL: {data['url']}")
-            print(f"   Price: {data['base_price'] or 'N/A'}")
-            print(f"   Classification: {data['page_type']} ({data['classification_confidence']:.0%} confidence)")
-            print(f"   Configurator: {data['configurator_type']} (confidence: {data['configurator_confidence']:.0%})")
+        for p in products:
+            print(f"📦 {p.get('product_name', 'Unknown')}")
+            print(f"   URL: {p.get('url', 'N/A')}")
+            print(f"   Price: {p.get('base_price') or 'N/A'}")
             
-            if data['configurator_url']:
-                print(f"   Configurator URL: {data['configurator_url']}")
+            if p.get('classification_confidence'):
+                print(f"   Classification: {p.get('page_type', 'N/A')} ({p['classification_confidence']:.0%} confidence)")
             
-            if data.get('external_platform'):
-                print(f"   External Platform: {data['external_platform']}")
+            print(f"   Configurator: {p.get('configurator_type', 'none')} (confidence: {p.get('configurator_confidence', 0):.0%})")
             
-            print(f"   Categories: {len(data['customization_categories'])}")
-            print(f"   Options: {data['total_customization_options']}")
-            print(f"   Source: {data['customization_source']}")
+            if p.get('configurator_url'):
+                print(f"   Configurator URL: {p['configurator_url']}")
+            
+            if p.get('external_platform'):
+                print(f"   External Platform: {p['external_platform']}")
+            
+            if p.get('extraction_method'):
+                print(f"   Extraction Method: {p['extraction_method']}")
+            
+            if p.get('customization_source'):
+                print(f"   Source: {p['customization_source']}")
+            
+            print(f"   Categories: {len(p.get('customization_categories', []))}")
+            print(f"   Options: {p.get('total_customization_options', 0)}")
             print()

@@ -119,6 +119,64 @@ class PlaywrightEngine:
             print("✓ Browser cleanup complete")
         except Exception as e:
             print(f"⚠ Cleanup warning: {e}")
+    
+    async def _prepare_page(self, page) -> None:
+        """Prepare page for exploration: kill overlays, detect configurator root."""
+        try:
+            # Kill overlays and interception layers
+            await page.evaluate("""
+                () => {
+                    // Kill common overlay patterns
+                    const overlayIds = ['bws-calc-overlay', 'overlay', 'modal-backdrop'];
+                    overlayIds.forEach(id => {
+                        const el = document.getElementById(id);
+                        if (el) {
+                            el.style.pointerEvents = 'none';
+                            el.style.display = 'none';
+                        }
+                    });
+                    
+                    // Kill aria-hidden overlays
+                    document.querySelectorAll('[aria-hidden=\"true\"]').forEach(el => {
+                        if (el.style.position === 'fixed' || el.style.position === 'absolute') {
+                            el.style.pointerEvents = 'none';
+                        }
+                    });
+                    
+                    // Kill cookie banners
+                    const cookieSelectors = ['[class*=\"cookie\"]', '[id*=\"cookie\"]', '[class*=\"gdpr\"]'];
+                    cookieSelectors.forEach(sel => {
+                        document.querySelectorAll(sel).forEach(el => {
+                            if (el.offsetHeight > 50) {  // Only large overlays
+                                el.style.display = 'none';
+                            }
+                        });
+                    });
+                }
+            """)
+            print("    ✓ Overlays neutralized")
+            
+            # Detect SPA/AEM patterns
+            is_spa = await page.evaluate("""
+                () => {
+                    const indicators = [
+                        document.querySelector('[data-react-root]'),
+                        document.querySelector('[data-reactroot]'),
+                        document.querySelector('#root'),
+                        document.querySelector('[ng-app]'),
+                        document.querySelector('[data-vue-app]'),
+                        window.__NEXT_DATA__,
+                        window.__NUXT__
+                    ];
+                    return indicators.some(x => x);
+                }
+            """)
+            
+            if is_spa:
+                print("    ⚠ SPA detected - UI exploration may be limited")
+            
+        except Exception as e:
+            print(f"    ⚠ Page preparation warning: {e}")
 
 
 class BrowserRunner:
@@ -133,13 +191,71 @@ class BrowserRunner:
         self.engine = PlaywrightEngine(config)
         self.network_responses = []
     
+    async def _prepare_page(self, page) -> None:
+        """Prepare page for exploration: kill overlays, detect configurator root."""
+        try:
+            # Kill overlays and interception layers
+            await page.evaluate("""
+                () => {
+                    // Kill common overlay patterns
+                    const overlayIds = ['bws-calc-overlay', 'overlay', 'modal-backdrop'];
+                    overlayIds.forEach(id => {
+                        const el = document.getElementById(id);
+                        if (el) {
+                            el.style.pointerEvents = 'none';
+                            el.style.display = 'none';
+                        }
+                    });
+                    
+                    // Kill aria-hidden overlays
+                    document.querySelectorAll('[aria-hidden="true"]').forEach(el => {
+                        if (el.style.position === 'fixed' || el.style.position === 'absolute') {
+                            el.style.pointerEvents = 'none';
+                        }
+                    });
+                    
+                    // Kill cookie banners
+                    const cookieSelectors = ['[class*="cookie"]', '[id*="cookie"]', '[class*="gdpr"]'];
+                    cookieSelectors.forEach(sel => {
+                        document.querySelectorAll(sel).forEach(el => {
+                            if (el.offsetHeight > 50) {  // Only large overlays
+                                el.style.display = 'none';
+                            }
+                        });
+                    });
+                }
+            """)
+            print("    ✓ Overlays neutralized")
+            
+            # Detect SPA/AEM patterns
+            is_spa = await page.evaluate("""
+                () => {
+                    const indicators = [
+                        document.querySelector('[data-react-root]'),
+                        document.querySelector('[data-reactroot]'),
+                        document.querySelector('#root'),
+                        document.querySelector('[ng-app]'),
+                        document.querySelector('[data-vue-app]'),
+                        window.__NEXT_DATA__,
+                        window.__NUXT__
+                    ];
+                    return indicators.some(x => x);
+                }
+            """)
+            
+            if is_spa:
+                print("    ⚠ SPA detected - UI exploration may be limited")
+            
+        except Exception as e:
+            print(f"    ⚠ Page preparation warning: {e}")
+    
     async def extract_dynamic_configurator(
         self,
         url: str,
         save_screenshot: bool = False
     ) -> Dict:
         """
-        Main extraction for dynamic configurators.
+        Main extraction for dynamic configurators using state exploration.
         
         Returns pricing model and discovered options.
         """
@@ -148,8 +264,9 @@ class BrowserRunner:
             'url': url,
             'extraction_method': 'dynamic_browser',
             'model': 'D',
-            'pricing_model': None,
+            'pricing_model': {'base_price': None, 'option_deltas': {}, 'confidence': 0.0},
             'options_discovered': [],
+            'states_discovered': [],
             'network_activity': [],
             'error': None
         }
@@ -171,32 +288,73 @@ class BrowserRunner:
                 result['error'] = 'Page load failed'
                 return result
             
-            # Wait for dynamic content
-            await asyncio.sleep(2)
+            # Wait for dynamic content + JS listeners to attach
+            await asyncio.sleep(1.5)
             
             if save_screenshot:
                 await self.engine.screenshot(f"debug_dynamic_{url.split('/')[-1]}.png")
             
-            # Discover controls
+            print(f"  [MODEL-D] Starting UI state exploration")
+            
+            # Step 0: Prepare page (kill overlays, find configurator root)
+            print(f"  [PREP] Preparing page for exploration...")
+            await self._prepare_page(page)
+            
+            # Step 1: Discover interactive controls (scoped to configurator)
+            print(f"  [CONTROLS] Finding interactive elements...")
             from .option_discovery import OptionDiscovery
             discovery = OptionDiscovery(page)
             controls = await discovery.find_interactive_controls()
             
-            result['options_discovered'] = [
+            print(f"  [CONTROLS] Found {len(controls)} interactive elements")
+            
+            # Step 2: Explore UI states
+            from .interaction_explorer import InteractionExplorer
+            explorer = InteractionExplorer(page, self.config)
+            states = await explorer.explore(controls)
+            
+            print(f"  [STATES] Discovered {len(states)} distinct states")
+            
+            # Step 3: Aggregate options from all states
+            all_options = []
+            for state in states:
+                for option in state.options_discovered:
+                    all_options.append({
+                        'type': state.control_type,
+                        'label': option['name'],
+                        'category': state.control_label,
+                        'price_text': option.get('price_text'),
+                        'price_delta': state.price_change,
+                        'available': option.get('available', True)
+                    })
+            
+            result['options_discovered'] = all_options
+            result['states_discovered'] = [
                 {
-                    'type': c['type'],
-                    'label': c['label'],
-                    'selector': c['selector']
+                    'control': state.control_label,
+                    'options_count': len(state.options_discovered),
+                    'price_change': state.price_change
                 }
-                for c in controls
+                for state in states
             ]
             
-            print(f"  🎛 Discovered {len(controls)} interactive controls")
+            # Step 4: Build pricing model (from states)
+            pricing_model = {
+                'base_price': None,
+                'price_type': 'dynamic_exploration',
+                'option_deltas': {},
+                'confidence': len(states) / max(len(controls), 1)
+            }
             
-            # Learn pricing
-            from .price_learner import PriceLearner
-            learner = PriceLearner(page, self.config)
-            pricing_model = await learner.learn_pricing_model(controls)
+            # Extract base price (first state or from DOM)
+            if states and states[0].price_change is not None:
+                # Attempt to calculate base from first delta
+                pass
+            
+            # Map option → price delta
+            for state in states:
+                if state.price_change:
+                    pricing_model['option_deltas'][state.control_label] = state.price_change
             
             result['pricing_model'] = pricing_model
             result['success'] = True
@@ -208,16 +366,19 @@ class BrowserRunner:
                     'method': r['method'],
                     'status': r['status']
                 }
-                for r in self.network_responses[:10]  # Limit to first 10
+                for r in self.network_responses[:10]
             ]
             
-            print(f"  ✓ Model-D extraction complete")
-            print(f"    Base price: ${pricing_model.get('base_price', 'N/A')}")
-            print(f"    Options with deltas: {len(pricing_model.get('option_deltas', {}))}")
+            print(f"  ✓ Model-D state exploration complete")
+            print(f"    States explored: {len(states)}")
+            print(f"    Options discovered: {len(all_options)}")
+            print(f"    Price deltas learned: {len(pricing_model['option_deltas'])}")
             
         except Exception as e:
             result['error'] = str(e)
             print(f"  ✗ Model-D extraction failed: {e}")
+            import traceback
+            traceback.print_exc()
         
         finally:
             await self.engine.cleanup()
