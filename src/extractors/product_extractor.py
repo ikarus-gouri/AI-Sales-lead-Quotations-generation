@@ -5,6 +5,8 @@ from typing import Dict, List, Optional
 from urllib.parse import urlparse
 
 from .color_extractor import ColorExtractor
+from .price_extractor import PriceExtractor
+from .specs_extractor import SpecsExtractor
 
 
 class ProductExtractor:
@@ -16,6 +18,8 @@ class ProductExtractor:
         use_llm_naming: bool = False
     ):
         self.enable_color_extraction = enable_color_extraction
+        self.price_extractor = PriceExtractor()
+        self.specs_extractor = SpecsExtractor()
 
         if self.enable_color_extraction:
             self.color_extractor = ColorExtractor(
@@ -28,28 +32,46 @@ class ProductExtractor:
     # ------------------------------------------------------------------
 
     def extract_product_name(self, url: str, markdown: str) -> str:
-        """Extract product name from markdown or URL."""
+        """Extract product name from markdown or URL, removing any embedded prices."""
         for line in markdown.split('\n'):
             line = line.strip()
             if line.startswith('# ') or line.startswith('## '):
                 title = line.lstrip('#').strip()
                 if len(title) > 3 and 'skip' not in title.lower() and 'content' not in title.lower():
-                    return title
+                    # Remove price patterns from title
+                    clean_title = self._strip_price_from_text(title)
+                    return clean_title.strip()
 
         # Fallback to URL
         path = urlparse(url).path
         return path.strip('/').split('/')[-1]
 
     def extract_base_price(self, markdown: str) -> Optional[str]:
-        """Extract base price from markdown."""
-        price_match = re.search(
-            r'Base Price:\s*\$[\d,]+(?:\.\d{2})?\s*(?:CAD|USD)?',
-            markdown,
-            re.IGNORECASE
-        )
-        if price_match:
-            return price_match.group(0).replace('Base Price:', '').strip()
-        return None
+        """Extract base price from markdown using the PriceExtractor."""
+        # First try standard price extraction
+        price = self.price_extractor.extract_base_price(markdown)
+        
+        # If not found, check product title for embedded price
+        if not price:
+            for line in markdown.split('\n')[:10]:  # Check first 10 lines
+                line = line.strip()
+                if line.startswith('# ') or line.startswith('## '):
+                    title = line.lstrip('#').strip()
+                    # Try to extract price from title
+                    title_price = self.price_extractor.extract_price_from_text(title)
+                    if title_price:
+                        return title_price
+        
+        return price
+
+    def extract_specifications(self, markdown: str) -> Dict[str, str]:
+        """
+        Extract product specifications from markdown using the comprehensive SpecsExtractor.
+        
+        Returns:
+            Dictionary of specification key-value pairs
+        """
+        return self.specs_extractor.extract_specifications(markdown)
 
     def extract_specifications(self, markdown: str) -> Dict[str, str]:
         """
@@ -237,9 +259,10 @@ class ProductExtractor:
         if 'pixel.wp.com' in image_url or 'g.gif' in image_url:
             return None
 
-        price_match = re.search(r'\(\+?\$[\d,]+\)', alt_text)
-        price = price_match.group(0).strip('()') if price_match else None
+        # Extract price using the price extractor
+        price = self.price_extractor.extract_option_price(alt_text)
 
+        # Clean label by removing price
         label = re.sub(r'\s*\(\+?\$[\d,]+\)\s*$', '', alt_text).strip()
 
         if label and len(label) > 2:
@@ -252,22 +275,28 @@ class ProductExtractor:
         return None
 
     def _extract_checkbox_option(self, line: str) -> Optional[Dict]:
-        checkbox_match = re.match(r'^-\s*\[x?\]\s*(.+?)\s*\(\+?\$[\d,]+\)', line)
+        checkbox_match = re.match(r'^-\s*\[x?\]\s*(.+)', line)
 
         if not checkbox_match:
             return None
 
-        full_text = checkbox_match.group(0)
-        label = checkbox_match.group(1).strip()
+        full_text = checkbox_match.group(1).strip()
+        
+        # Extract price using the price extractor
+        price = self.price_extractor.extract_option_price(full_text)
+        
+        # Clean label by removing price patterns
+        label = re.sub(r'\s*\(\+?\$[\d,]+\)\s*$', '', full_text).strip()
+        label = re.sub(r'\s*[\+\-]\$[\d,]+\s*$', '', label).strip()
 
-        price_match = re.search(r'\(\+?\$[\d,]+\)', full_text)
-        price = price_match.group(0).strip('()') if price_match else None
+        if label and len(label) > 2:
+            return {
+                "label": label,
+                "price": price,
+                "image": None
+            }
 
-        return {
-            "label": label,
-            "price": price,
-            "image": None
-        }
+        return None
 
     def _clean_customizations(self, customizations: Dict) -> Dict:
         cleaned = {}
@@ -310,3 +339,25 @@ class ProductExtractor:
 
     def _extract_all_images(self, markdown: str) -> List[str]:
         return re.findall(r'!\[[^\]]*\]\(([^\)]+)\)', markdown)
+    
+    def _strip_price_from_text(self, text: str) -> str:
+        """Remove price patterns from text, returning clean text."""
+        # Remove common price patterns
+        patterns = [
+            r'\s*[-–—]\s*\$[\d,]+(?:\.\d{2})?\s*(?:CAD|USD|EUR|GBP)?',  # " - $1,299 CAD"
+            r'\s*\$[\d,]+(?:\.\d{2})?\s*(?:CAD|USD|EUR|GBP)?',  # " $1,299 CAD"
+            r'\s*[€£¥₹][\d,]+(?:\.\d{2})?',  # Other currency symbols
+            r'\s*\([\d,]+(?:\.\d{2})?\s*(?:CAD|USD|EUR|GBP)?\)',  # " (1,299 CAD)"
+            r'\s*[-–—]\s*from\s+\$[\d,]+',  # " - from $1,299"
+            r'\s*from\s+\$[\d,]+',  # " from $1,299"
+        ]
+        
+        clean_text = text
+        for pattern in patterns:
+            clean_text = re.sub(pattern, '', clean_text, flags=re.IGNORECASE)
+        
+        # Clean up extra whitespace and separators
+        clean_text = re.sub(r'\s*[-–—|:]\s*$', '', clean_text)  # Trailing separators
+        clean_text = re.sub(r'\s+', ' ', clean_text)  # Multiple spaces
+        
+        return clean_text.strip()

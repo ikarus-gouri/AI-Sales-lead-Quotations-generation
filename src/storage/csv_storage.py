@@ -19,6 +19,7 @@ class CSVStorage:
             for product in catalog:
                 product_name = product.get("product_name") or product.get("name", "Unknown Product")
                 product_url = product.get("url", "")
+                specifications = product.get("specifications", {})
 
                 # Base product row
                 rows.append([
@@ -26,6 +27,18 @@ class CSVStorage:
                     product_name,
                     product_url
                 ])
+                
+                # Specifications
+                if specifications:
+                    rows.append(["", "", ""])  # Empty row
+                    rows.append(["Specifications", "", ""])
+                    for spec_key, spec_value in specifications.items():
+                        rows.append([
+                            "",
+                            f"{spec_key}: {spec_value}",
+                            ""
+                        ])
+                    rows.append(["", "", ""])  # Empty row
 
                 # Customizations
                 customizations = product.get("customizations", {})
@@ -54,6 +67,7 @@ class CSVStorage:
             for product_id, product in catalog.items():
                 product_name = product.get("product_name") or product.get("name", "Unknown Product")
                 product_url = product.get("url", "")
+                specifications = product.get("specifications", {})
 
                 # Base product row
                 rows.append([
@@ -61,6 +75,18 @@ class CSVStorage:
                     product_name,
                     product_url
                 ])
+                
+                # Specifications
+                if specifications:
+                    rows.append(["", "", ""])  # Empty row
+                    rows.append(["Specifications", "", ""])
+                    for spec_key, spec_value in specifications.items():
+                        rows.append([
+                            "",
+                            f"{spec_key}: {spec_value}",
+                            ""
+                        ])
+                    rows.append(["", "", ""])  # Empty row
 
                 # Customizations
                 customizations = product.get("customizations", {})

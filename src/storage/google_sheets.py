@@ -432,6 +432,7 @@ class GoogleSheetsStorage:
             product_name = product_data.get('product_name', 'Unknown Product')
             base_price = product_data.get('base_price') or 'N/A'
             product_url = product_data.get('url', '')
+            specifications = product_data.get('specifications', {})
 
             # Product header
             if include_prices:
@@ -450,6 +451,31 @@ class GoogleSheetsStorage:
                     '',
                     product_url
                 ])
+            
+            # Specifications section
+            if specifications:
+                rows.append(['', '', '', '', '', ''])  # Empty row for spacing
+                rows.append(['Specifications', '', '', '', '', ''])
+                
+                for spec_key, spec_value in specifications.items():
+                    if include_prices:
+                        rows.append([
+                            '',
+                            f"{spec_key}: {spec_value}",
+                            '',
+                            '',
+                            'Specification',
+                            ''
+                        ])
+                    else:
+                        rows.append([
+                            '',
+                            f"{spec_key}: {spec_value}",
+                            '',
+                            'Specification'
+                        ])
+                
+                rows.append(['', '', '', '', '', ''])  # Empty row after specs
 
             # Customization categories
             customizations = product_data.get('customizations', {})
