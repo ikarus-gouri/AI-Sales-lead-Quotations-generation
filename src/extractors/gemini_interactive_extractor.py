@@ -1,6 +1,7 @@
 """
-Gemini + Playwright Interactive Configurator Extractor
-Uses Gemini to guide Playwright on what to click to discover all options
+Gemini + Playwright Multi-Model Interactive Configurator Extractor
+Discovers all models, completes full configuration for each, then moves to next model
+Uses cached patterns to minimize Gemini API calls
 """
 
 import os
@@ -19,7 +20,7 @@ load_dotenv()
 
 
 class GeminiInteractiveExtractor:
-    """Interactive extraction using Gemini to guide Playwright"""
+    """Interactive extraction with intelligent multi-model exploration"""
     
     def __init__(self, api_key: Optional[str] = None):
         """Initialize Gemini Flash with API key"""
@@ -31,43 +32,41 @@ class GeminiInteractiveExtractor:
         genai.configure(api_key=self.api_key)
         self.model = genai.GenerativeModel('gemini-2.5-flash')
         
-        # Store discovered options
-        self.discovered_options = []
-        self.visited_states = set()
-        self.max_depth = 10
+        # MODEL DISCOVERY & TRACKING
+        self.all_models = []              # All discovered models at start
+        self.explored_models = set()      # Models that have been fully configured
+        self.current_model = None         # Currently exploring model
         
-        # Pattern detection for optimization
-        self.detected_pattern = None
-        self.pattern_confidence = 0
-        self.actions_history = []
+        # NAVIGATION CACHE
+        self.restart_button_cache = None   # How to get back to model selection
+        self.continue_button_class = None  # Class for "Continue" buttons
+        self.workflow_steps = []           # Sequence of customization steps
+        
+        # OPTIONS STORAGE
+        self.all_options = []
+        
+        # Stats
+        self.stats = {
+            'total_iterations': 0,
+            'gemini_consultations': 0,
+            'cached_navigations': 0,
+            'models_completed': 0
+        }
         
     async def capture_page_state(self, page) -> Dict:
-        """Capture current page state with screenshot and elements"""
+        """Capture current page state"""
         try:
-            # Take screenshot
             screenshot_bytes = await page.screenshot(type='png')
             screenshot_b64 = base64.b64encode(screenshot_bytes).decode('utf-8')
             
-            # Extract interactive elements with their positions
             elements = await page.evaluate("""() => {
                 const elements = [];
-                
-                // Find ALL interactive elements (including disabled ones)
                 const selectors = [
-                    'button',
-                    '[role="button"]',
-                    'a[href]',
-                    '.card',
-                    '[class*="option"]',
-                    '[class*="choice"]',
-                    '[class*="model"]',
-                    '[class*="selector"]',
-                    'input[type="radio"]',
-                    'input[type="checkbox"]',
-                    'select',
-                    '[class*="next"]',
-                    '[class*="continue"]',
-                    '[class*="submit"]'
+                    'button', '[role="button"]', 'a[href]', '.card',
+                    '[class*="option"]', '[class*="choice"]', '[class*="model"]',
+                    'input[type="radio"]', 'input[type="checkbox"]', 'select',
+                    '[class*="next"]', '[class*="continue"]', '[class*="submit"]',
+                    '[class*="start"]', '[class*="restart"]', '[class*="back"]'
                 ];
                 
                 selectors.forEach(selector => {
@@ -84,14 +83,10 @@ class GeminiInteractiveExtractor:
                                              el.classList.contains('disabled') ||
                                              el.style.pointerEvents === 'none';
                             
-                            const isSelected = el.checked || 
-                                             el.selected ||
+                            const isSelected = el.checked || el.selected ||
                                              el.classList.contains('selected') ||
-                                             el.classList.contains('active') ||
-                                             el.getAttribute('aria-checked') === 'true' ||
-                                             el.getAttribute('aria-selected') === 'true';
+                                             el.classList.contains('active');
                             
-                            // Try to find an image within this element
                             let imageUrl = '';
                             const img = el.querySelector('img');
                             if (img) {
@@ -112,12 +107,6 @@ class GeminiInteractiveExtractor:
                                 position: {
                                     x: Math.round(rect.left + rect.width / 2),
                                     y: Math.round(rect.top + rect.height / 2)
-                                },
-                                attributes: {
-                                    href: el.href,
-                                    type: el.type,
-                                    name: el.name,
-                                    value: el.value
                                 }
                             });
                         }
@@ -127,12 +116,11 @@ class GeminiInteractiveExtractor:
                 return elements;
             }""")
             
-            # Get current visible text
             visible_text = await page.inner_text('body')
             
             return {
                 'screenshot': screenshot_b64,
-                'elements': elements[:50],  # Limit to first 50
+                'elements': elements[:50],
                 'visible_text': visible_text[:5000],
                 'url': page.url
             }
@@ -141,98 +129,63 @@ class GeminiInteractiveExtractor:
             print(f"Error capturing page state: {e}")
             return None
     
-    def ask_gemini_what_to_click(self, page_state: Dict, discovered_so_far: List) -> Dict:
-        """Ask Gemini what to click next to discover more options"""
+    def ask_gemini_for_initial_analysis(self, page_state: Dict) -> Dict:
+        """First Gemini call: Discover all models and understand the flow"""
         
         prompt = f"""
-You are guiding an automated browser to extract ALL customization options from a product configurator.
+You are analyzing a product configurator to discover ALL available base models/products.
 
-Current Page URL: {page_state['url']}
-
-Discovered Options So Far ({len(discovered_so_far)} items):
-{json.dumps(discovered_so_far[-10:], indent=2) if discovered_so_far else 'None yet'}
-
-Current Page Visible Text:
+Current Page:
 {page_state['visible_text'][:3000]}
 
-Available Interactive Elements (with positions and states):
+Available Elements:
 {json.dumps(page_state['elements'][:30], indent=2)}
 
-TASK: Analyze the page and tell me:
-1. What NEW options are visible on the current page that we haven't captured yet?
-2. For EACH option found, look through the 'Available Interactive Elements' list above and find matching elements
-3. Extract the 'image' field value from matching elements - this contains the image URL for that option
-4. Are there any ENABLED (not disabled) option buttons/cards that need to be selected?
-5. What should I click next to reveal MORE customization options?
+TASK 1: DISCOVER ALL MODELS
+Identify ALL base model/product options visible on this initial page. These are typically:
+- Model names (e.g., "2026 KING AIRE", "2026 ESSEX")
+- Product collections
+- Base product variants
+- Main categories user must choose from first
 
-IMPORTANT RULES FOR IMAGE EXTRACTION:
-- Look at the 'Available Interactive Elements' JSON data above
-- Each element has an 'image' field - extract this URL for each option you find
-- Match option text to element 'text' field to find the corresponding image URL
-- If an element has a non-empty 'image' field, include it in the new_options_visible
+TASK 2: UNDERSTAND WORKFLOW
+Analyze the page structure to understand:
+- What happens after selecting a model? (e.g., floor plan selection)
+- Are there "Continue" buttons? What's their class name?
+- Is there a "Start Over" or restart button? What's its text/class?
+- What customization steps follow? (try to identify from tabs, headers, or button text)
 
-IMPORTANT RULES FOR CLICKING:
-- NEVER click disabled buttons (disabled: true)
-- "Next", "Continue", "Submit" buttons are often disabled until required selections are made
-- FIRST select/click option cards or radio buttons on the current page
-- THEN once selections are made, disabled buttons may become enabled
-- Check the 'disabled' field - if true, DO NOT recommend clicking it
-- Only recommend clicking ENABLED elements (disabled: false)
-- Extract image URLs from the 'image' field in element data and include them in new_options_visible
-
-CONDITIONAL/DEPENDENT OPTIONS:
-- Some configurators reveal new options ONLY after selecting a previous option
-- Example: Selecting a model might reveal model-specific customization options
-- These pages may NOT have explicit "Next" buttons - content just updates dynamically
-- If you see unselected options but no new categories, SELECT an option to see what it reveals
-- After selecting, new options for that selection may appear on the same page
-- Pattern: select option → wait → new options appear → extract them → select next option
-- Don't assume you need a "Next" button - selection alone might reveal content
-
-Return JSON with this structure:
+Return JSON:
 {{
-  "new_options_visible": [
+  "all_models": [
     {{
-      "category": "string - category name (e.g., Model, Floor Plan, Exterior Paint)",
-      "component": "string - option name (e.g., 2026 KING AIRE, 4521, ANTRIM)",
-      "price": "string - price if visible, else N/A",
-      "reference": "string - any additional reference info",
-      "image": "string - REQUIRED: Extract from 'image' field in matching element, empty string if not found"
-    }}
-  ],
-  "actions_sequence": [
-    {{
-      "action_type": "select" | "click_next" | "click_tab",
-      "element_description": "string",
-      "element_text": "string",
-      "reason": "string",
+      "name": "string - exact model name",
+      "image": "string - image URL from elements if available",
       "selector_hints": {{
         "text_contains": "string",
-        "class_contains": "string",
-        "position_x": number,
-        "position_y": number
+        "class_contains": "string"
       }}
     }}
   ],
-  "workflow_pattern": {{
-    "detected": boolean,
-    "pattern_type": "select_then_next" | "tabs" | "accordion" | "conditional_reveal" | "none",
-    "description": "string - describe the pattern"
+  "workflow_info": {{
+    "has_continue_button": boolean,
+    "continue_button_class": "string - CSS class for Continue buttons",
+    "has_restart_button": boolean,
+    "restart_button_text": "string - text on restart button",
+    "restart_button_class": "string - class for restart button",
+    "customization_steps": ["string - list of step names like Floor Plan, Exterior, Interior"]
   }},
-  "exploration_complete": boolean
+  "first_action": {{
+    "action_type": "select",
+    "element_text": "string - first model to select",
+    "reason": "string"
+  }}
 }}
 
 IMPORTANT:
-- NEVER recommend clicking disabled elements (disabled: true)
-- You can recommend MULTIPLE actions in sequence (e.g., select option THEN click next)
-- OR you can recommend SINGLE action (just select) if it will reveal new content dynamically
-- Look for patterns: if this is a multi-step form, describe the workflow pattern
-- For "select_then_next" pattern: recommend selecting an option AND clicking next in one sequence
-- For "conditional_reveal" pattern: recommend selecting options one at a time to reveal dependent options
-- If you detect a repeating pattern (like tabs or multi-step wizard), set workflow_pattern.detected = true
-- Extract ALL visible options in new_options_visible before recommending actions
-- Priority: Select options → Click Next → Move to next tab/section
-- Group related actions together to minimize iterations
+- Extract ALL models visible, not just one
+- Look for consistent button classes (they won't change between models)
+- Identify the workflow pattern to optimize future iterations
 
 Only return valid JSON.
 """
@@ -241,7 +194,6 @@ Only return valid JSON.
             response = self.model.generate_content(prompt)
             response_text = response.text.strip()
             
-            # Clean JSON
             if response_text.startswith('```json'):
                 response_text = response_text[7:]
             if response_text.startswith('```'):
@@ -249,380 +201,421 @@ Only return valid JSON.
             if response_text.endswith('```'):
                 response_text = response_text[:-3]
             
-            result = json.loads(response_text.strip())
-            return result
-            
+            return json.loads(response_text.strip())
         except Exception as e:
-            print(f"Error asking Gemini: {e}")
+            print(f"Error in initial analysis: {e}")
             return {
-                'new_options_visible': [],
-                'actions_sequence': [],
-                'workflow_pattern': {'detected': False},
-                'exploration_complete': True
+                'all_models': [],
+                'workflow_info': {},
+                'first_action': None
             }
     
-    async def find_and_click_element(self, page, recommendation: Dict) -> bool:
-        """Find and click the element recommended by Gemini"""
+    def ask_gemini_for_guidance(self, page_state: Dict, context: Dict) -> Dict:
+        """Ask Gemini for next action during configuration"""
+        
+        explored_info = ""
+        if self.explored_models:
+            explored_info = f"""
+✅ COMPLETED MODELS: {', '.join(sorted(self.explored_models))}
+"""
+        
+        pending_info = ""
+        pending_models = set(m['name'] for m in self.all_models) - self.explored_models
+        if pending_models:
+            pending_info = f"""
+⏳ PENDING MODELS: {', '.join(sorted(pending_models))}
+"""
+        
+        current_info = f"🔧 CURRENT MODEL: {self.current_model}" if self.current_model else ""
+        
+        prompt = f"""
+You are guiding extraction of customization options from a configurator.
+
+{explored_info}{pending_info}{current_info}
+
+Current Page:
+{page_state['visible_text'][:3000]}
+
+Discovered Options So Far: {len(self.all_options)}
+
+Available Elements:
+{json.dumps(page_state['elements'][:30], indent=2)}
+
+Context:
+- Total models to explore: {len(self.all_models)}
+- Models completed: {len(self.explored_models)}
+- Workflow steps we know: {', '.join(self.workflow_steps) if self.workflow_steps else 'Learning...'}
+
+TASK:
+1. Extract NEW visible customization options
+2. Recommend next action to continue configuration
+3. Detect if configuration is COMPLETE for current model
+
+Return JSON:
+{{
+  "new_options": [
+    {{
+      "category": "string",
+      "component": "string",
+      "price": "string",
+      "reference": "string",
+      "image": "string"
+    }}
+  ],
+  "current_step": "string - current customization step name (e.g., Floor Plan, Exterior)",
+  "configuration_complete": boolean - true if reached end of configuration for this model,
+  "next_action": {{
+    "action_type": "select" | "click_next" | "click_tab" | "expand_accordion",
+    "element_text": "string",
+    "reason": "string",
+    "selector_hints": {{
+      "text_contains": "string",
+      "class_contains": "string"
+    }}
+  }}
+}}
+
+IMPORTANT:
+- Extract ALL visible options before recommending actions
+- If you see a "Finish", "Complete", "Summary", or "Review" page, set configuration_complete = true
+- Select first available option in each category to move forward
+- Look for Continue/Next buttons with consistent class names
+
+Only return valid JSON.
+"""
+        
         try:
-            hints = recommendation.get('selector_hints', {})
-            text_contains = hints.get('text_contains', '')
-            class_contains = hints.get('class_contains', '')
-            position = (hints.get('position_x'), hints.get('position_y'))
+            response = self.model.generate_content(prompt)
+            response_text = response.text.strip()
             
-            print(f"  → Looking for element with text: '{text_contains}'")
+            if response_text.startswith('```json'):
+                response_text = response_text[7:]
+            if response_text.startswith('```'):
+                response_text = response_text[3:]
+            if response_text.endswith('```'):
+                response_text = response_text[:-3]
             
-            # Strategy 1: Try exact text match
-            if text_contains:
-                try:
-                    element = page.get_by_text(text_contains, exact=False).first
-                    if await element.is_visible():
-                        # Check if disabled before clicking
-                        is_disabled = await element.evaluate("""el => {
-                            return el.disabled || 
-                                   el.hasAttribute('disabled') || 
-                                   el.getAttribute('aria-disabled') === 'true' ||
-                                   el.classList.contains('disabled') ||
-                                   el.style.pointerEvents === 'none';
-                        }""")
-                        
-                        if is_disabled:
-                            print(f"  ⚠️ Element is disabled, skipping: '{text_contains}'")
-                            return False
-                        
-                        await element.scroll_into_view_if_needed()
-                        
-                        # Try regular click first, then JavaScript click as fallback
-                        try:
-                            await element.click(timeout=3000)
-                            print(f"  ✓ Clicked element by text: '{text_contains}'")
-                        except:
-                            # Fallback to JavaScript click
-                            await element.evaluate('el => el.click()')
-                            print(f"  ✓ Clicked element via JavaScript: '{text_contains}'")
-                        
-                        return True
-                except Exception as e:
-                    pass
-            
-            # Strategy 2: Try by role and text
-            if text_contains:
-                try:
-                    element = page.get_by_role('button', name=text_contains).first
-                    if await element.is_visible():
-                        # Check if disabled
-                        is_disabled = await element.evaluate("""el => {
-                            return el.disabled || 
-                                   el.hasAttribute('disabled') || 
-                                   el.getAttribute('aria-disabled') === 'true' ||
-                                   el.classList.contains('disabled');
-                        }""")
-                        
-                        if is_disabled:
-                            print(f"  ⚠️ Button is disabled, skipping: '{text_contains}'")
-                            return False
-                        
-                        await element.scroll_into_view_if_needed()
-                        await element.click(timeout=3000)
-                        print(f"  ✓ Clicked button: '{text_contains}'")
-                        return True
-                except Exception as e:
-                    pass
-            
-            # Strategy 3: Try finding by class
-            if class_contains:
-                try:
-                    element = page.locator(f'[class*="{class_contains}"]').first
-                    if await element.is_visible():
-                        # Check if disabled
-                        is_disabled = await element.evaluate("""el => {
-                            return el.disabled || 
-                                   el.hasAttribute('disabled') || 
-                                   el.getAttribute('aria-disabled') === 'true' ||
-                                   el.classList.contains('disabled');
-                        }""")
-                        
-                        if is_disabled:
-                            print(f"  ⚠️ Element is disabled, skipping class: '{class_contains}'")
-                            return False
-                        
-                        await element.scroll_into_view_if_needed()
-                        await element.click(timeout=3000)
-                        print(f"  ✓ Clicked element by class: '{class_contains}'")
-                        return True
-                except Exception as e:
-                    pass
-            
-            # Strategy 4: Try clicking at position
-            if position[0] and position[1]:
-                try:
-                    await page.mouse.click(position[0], position[1])
-                    print(f"  ✓ Clicked at position: {position}")
-                    return True
-                except Exception as e:
-                    pass
-            
-            print(f"  ✗ Could not find element to click")
-            return False
-            
+            return json.loads(response_text.strip())
         except Exception as e:
-            print(f"  ✗ Error clicking: {e}")
+            print(f"Error getting guidance: {e}")
+            return {
+                'new_options': [],
+                'configuration_complete': False,
+                'next_action': None
+            }
+    
+    async def click_element(self, page, selector_hints: Dict) -> bool:
+        """Click an element using selector hints"""
+        try:
+            text = selector_hints.get('text_contains', '')
+            class_name = selector_hints.get('class_contains', '')
+            
+            # Try text-based selector
+            if text:
+                try:
+                    element = page.get_by_text(text, exact=False).first
+                    if await element.is_visible():
+                        is_disabled = await element.evaluate("""el => {
+                            return el.disabled || el.hasAttribute('disabled') || 
+                                   el.getAttribute('aria-disabled') === 'true' ||
+                                   el.classList.contains('disabled');
+                        }""")
+                        
+                        if not is_disabled:
+                            await element.scroll_into_view_if_needed()
+                            try:
+                                await element.click(timeout=3000)
+                            except:
+                                await element.evaluate('el => el.click()')
+                            print(f"  ✓ Clicked: '{text}'")
+                            return True
+                except:
+                    pass
+            
+            # Try class-based selector
+            if class_name:
+                try:
+                    element = page.locator(f".{class_name}").first
+                    if await element.is_visible():
+                        is_disabled = await element.evaluate("""el => {
+                            return el.disabled || el.hasAttribute('disabled');
+                        }""")
+                        
+                        if not is_disabled:
+                            await element.scroll_into_view_if_needed()
+                            await element.click(timeout=3000)
+                            print(f"  ✓ Clicked (class): {class_name}")
+                            return True
+                except:
+                    pass
+            
+            return False
+        except Exception as e:
+            print(f"  ✗ Click failed: {e}")
             return False
     
-    async def execute_action_sequence(self, page, actions: List[Dict]) -> int:
-        """Execute a sequence of actions and return count of successful actions"""
-        successful = 0
+    async def try_cached_continue(self, page) -> bool:
+        """Try to click Continue button using cached class"""
+        if not self.continue_button_class:
+            return False
         
-        for i, action in enumerate(actions, 1):
-            action_type = action.get('action_type', 'click')
-            print(f"\n  [{i}/{len(actions)}] {action_type.upper()}: {action.get('element_description')}")
-            
-            # Check if this is a next/continue button (last action in sequence)
-            is_next_button = (i == len(actions) and 
-                            action_type.lower() == 'click_next')
-            
-            # Check if this is a select action that might reveal content
-            is_select_action = action_type.lower() == 'select'
-            
-            clicked = await self.find_and_click_element(page, action)
-            
-            if clicked:
-                successful += 1
+        try:
+            element = page.locator(f".{self.continue_button_class}").first
+            if await element.is_visible():
+                is_disabled = await element.evaluate("""el => {
+                    return el.disabled || el.hasAttribute('disabled') ||
+                           el.classList.contains('disabled');
+                }""")
                 
-                if is_next_button:
-                    # For next/continue buttons, wait longer for navigation/content change
-                    print("  → Waiting for page transition...")
-                    try:
-                        # Wait for either URL change or network to be idle
-                        await page.wait_for_load_state('networkidle', timeout=5000)
-                    except:
-                        # Fallback to regular timeout
-                        await page.wait_for_timeout(3000)
-                elif is_select_action:
-                    # For select actions, wait for potential dynamic content reveal
-                    print("  → Waiting for content reveal...")
-                    try:
-                        # Wait for network activity to settle (content might load)
-                        await page.wait_for_load_state('networkidle', timeout=3000)
-                    except:
-                        # Fallback to regular timeout
-                        await page.wait_for_timeout(2000)
-                else:
-                    # Regular action, shorter wait
-                    await page.wait_for_timeout(1500)
-            else:
-                print(f"  ⚠️ Failed to execute action, continuing...")
+                if not is_disabled:
+                    button_text = await element.inner_text()
+                    await element.scroll_into_view_if_needed()
+                    await element.click(timeout=3000)
+                    print(f"  ✓ Cached Continue clicked: '{button_text}'")
+                    self.stats['cached_navigations'] += 1
+                    return True
+        except:
+            pass
         
-        return successful
+        return False
     
-    def detect_and_apply_pattern(self, workflow_pattern: Dict) -> Optional[List[Dict]]:
-        """Detect workflow patterns and generate actions automatically"""
-        if not workflow_pattern.get('detected'):
-            return None
+    async def restart_to_model_selection(self, page) -> bool:
+        """Navigate back to model selection page"""
+        print("\n🔄 Attempting to return to model selection...")
         
-        pattern_type = workflow_pattern.get('pattern_type')
+        # Try cached restart button
+        if self.restart_button_cache:
+            print(f"  → Using cached restart button")
+            if await self.click_element(page, self.restart_button_cache):
+                await page.wait_for_timeout(3000)
+                self.stats['cached_navigations'] += 1
+                return True
         
-        if pattern_type == 'select_then_next':
-            # Store the pattern for future iterations
-            if not self.detected_pattern:
-                self.detected_pattern = pattern_type
-                print(f"\n🔍 Pattern detected: {workflow_pattern.get('description')}")
-                print("   Future iterations will use this pattern automatically")
-            return None  # Let Gemini guide the first few times
+        # Try common restart patterns
+        restart_patterns = [
+            'start over', 'restart', 'begin again', 'start again',
+            'clear', 'reset', 'new configuration', 'back to models'
+        ]
         
-        elif pattern_type == 'conditional_reveal':
-            # Store the pattern for conditional options
-            if not self.detected_pattern:
-                self.detected_pattern = pattern_type
-                print(f"\n🔍 Pattern detected: {workflow_pattern.get('description')}")
-                print("   Options reveal dynamically after selections")
-                print("   Will select options one at a time to reveal dependent options")
-            return None  # Let Gemini guide each selection
+        for pattern in restart_patterns:
+            try:
+                element = page.get_by_text(pattern, exact=False).first
+                if await element.is_visible():
+                    await element.scroll_into_view_if_needed()
+                    await element.click(timeout=3000)
+                    print(f"  ✓ Found restart button: '{pattern}'")
+                    await page.wait_for_timeout(3000)
+                    
+                    # Cache it
+                    self.restart_button_cache = {'text_contains': pattern}
+                    return True
+            except:
+                continue
         
-        return None
+        print("  ⚠️ Could not find restart button, may need Gemini help")
+        return False
     
-    async def interactive_extraction(self, url: str, max_iterations: int = 15) -> List[Dict]:
-        """
-        Interactively explore configurator using Gemini's guidance
+    async def configure_single_model(self, page, model_name: str, max_steps: int = 20) -> List[Dict]:
+        """Complete full configuration for a single model"""
+        print(f"\n{'='*80}")
+        print(f"CONFIGURING MODEL: {model_name}")
+        print(f"{'='*80}")
         
-        Args:
-            url: The configurator URL
-            max_iterations: Maximum number of click iterations
+        model_options = []
+        
+        for step in range(max_steps):
+            self.stats['total_iterations'] += 1
             
-        Returns:
-            List of all discovered options
+            print(f"\n  Step {step + 1}/{max_steps}")
+            
+            # Capture page state
+            page_state = await self.capture_page_state(page)
+            if not page_state:
+                break
+            
+            # Try cached Continue first (after step 2)
+            if step > 1 and self.continue_button_class:
+                if await self.try_cached_continue(page):
+                    await page.wait_for_timeout(2000)
+                    continue
+            
+            # Ask Gemini for guidance
+            print("  → Consulting Gemini...")
+            self.stats['gemini_consultations'] += 1
+            
+            guidance = self.ask_gemini_for_guidance(page_state, {
+                'current_model': model_name,
+                'step_number': step
+            })
+            
+            # Extract options
+            new_options = guidance.get('new_options', [])
+            if new_options:
+                print(f"  ✓ Found {len(new_options)} options")
+                for opt in new_options:
+                    opt['model'] = model_name  # Tag with model name
+                    print(f"    • {opt.get('category')} → {opt.get('component')}")
+                model_options.extend(new_options)
+            
+            # Track workflow step
+            current_step = guidance.get('current_step')
+            if current_step and current_step not in self.workflow_steps:
+                self.workflow_steps.append(current_step)
+                print(f"  📌 Workflow step learned: {current_step}")
+            
+            # Check if configuration complete
+            if guidance.get('configuration_complete'):
+                print(f"\n  ✅ Configuration complete for {model_name}")
+                break
+            
+            # Execute next action
+            next_action = guidance.get('next_action')
+            if next_action:
+                selector_hints = next_action.get('selector_hints', {})
+                
+                # Cache Continue button class if found
+                if next_action.get('action_type') == 'click_next':
+                    class_hint = selector_hints.get('class_contains', '')
+                    if class_hint and not self.continue_button_class:
+                        self.continue_button_class = class_hint
+                        print(f"  📌 Continue button class cached: {class_hint}")
+                
+                # Click element
+                clicked = await self.click_element(page, selector_hints)
+                if clicked:
+                    await page.wait_for_timeout(2000)
+                else:
+                    print(f"  ⚠️ Failed to execute action, may be stuck")
+                    break
+            else:
+                print("  ⚠️ No action recommended, configuration may be complete")
+                break
+        
+        return model_options
+    
+    async def interactive_extraction(self, url: str, max_iterations: int = 100) -> List[Dict]:
+        """
+        Main extraction loop: discovers models, configures each fully
         """
         print(f"\n{'='*80}")
-        print(f"GEMINI + PLAYWRIGHT INTERACTIVE EXTRACTION")
+        print(f"MULTI-MODEL CONFIGURATOR EXTRACTION")
         print(f"{'='*80}\n")
-        print(f"Target URL: {url}")
-        print(f"Max Iterations: {max_iterations}\n")
-        
-        all_options = []
-        previous_url = None
-        previous_content_hash = None
-        no_change_count = 0
+        print(f"Target URL: {url}\n")
         
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=False)
             page = await browser.new_page()
             
             try:
-                # Initial page load
+                # Step 1: Load page and discover models
                 print("→ Loading initial page...")
                 await page.goto(url, wait_until='domcontentloaded', timeout=60000)
                 await page.wait_for_timeout(3000)
                 
-                # Iterative exploration
-                for iteration in range(max_iterations):
-                    print(f"\n{'─'*80}")
-                    print(f"ITERATION {iteration + 1}/{max_iterations}")
-                    print(f"{'─'*80}")
-                    
-                    # Capture current state
-                    print("→ Capturing page state...")
-                    page_state = await self.capture_page_state(page)
-                    
-                    if not page_state:
-                        print("✗ Failed to capture page state")
-                        break
-                    
-                    # Check if page has changed (URL, content, or visible text)
-                    current_url = page.url
-                    current_content = str(page_state.get('interactive_elements', []))
-                    current_content_hash = hash(current_content)
-                    
-                    # Also check main heading/step text to detect SPA changes
-                    try:
-                        current_main_text = await page.inner_text('body')
-                        current_main_text = current_main_text[:1000]  # First 1000 chars
-                    except:
-                        current_main_text = ""
-                    
-                    page_changed = (current_url != previous_url or 
-                                  current_content_hash != previous_content_hash or
-                                  (previous_url is not None and current_main_text != getattr(self, '_prev_main_text', '')))
-                    
-                    if not page_changed and iteration > 0:
-                        no_change_count += 1
-                        print(f"⚠️ Page hasn't changed (attempt {no_change_count})")
-                        
-                        # If page hasn't changed after actions, try clicking next without Gemini
-                        if no_change_count <= 2:
-                            print("→ Retrying next button without consulting Gemini...")
-                            # Try to find and click common "next" buttons
-                            next_button_found = False
-                            for next_text in ['CONTINUE', 'NEXT', 'Next', 'Continue', 'PROCEED']:
-                                try:
-                                    element = page.get_by_text(next_text, exact=False).first
-                                    if await element.is_visible():
-                                        is_disabled = await element.evaluate("""el => {
-                                            return el.disabled || 
-                                                   el.hasAttribute('disabled') || 
-                                                   el.getAttribute('aria-disabled') === 'true' ||
-                                                   el.classList.contains('disabled') ||
-                                                   el.style.pointerEvents === 'none';
-                                        }""")
-                                        
-                                        if not is_disabled:
-                                            await element.scroll_into_view_if_needed()
-                                            await element.click(timeout=3000)
-                                            print(f"  ✓ Clicked: '{next_text}'")
-                                            
-                                            # Wait for navigation/content change
-                                            print("  → Waiting for page transition...")
-                                            try:
-                                                await page.wait_for_load_state('networkidle', timeout=5000)
-                                            except:
-                                                await page.wait_for_timeout(3000)
-                                            
-                                            next_button_found = True
-                                            break
-                                except:
-                                    continue
-                            
-                            if not next_button_found:
-                                print("  ⚠️ No enabled next button found")
-                            
-                            # Continue to next iteration to check if page changed
-                            continue
-                        else:
-                            print("⚠️ Page still hasn't changed after retries")
-                            # Fall through to consult Gemini
-                    else:
-                        no_change_count = 0  # Reset counter when page changes
-                    
-                    # Ask Gemini what to do (only when page changed or after retries failed)
-                    print("→ Consulting Gemini for guidance...")
-                    guidance = self.ask_gemini_what_to_click(page_state, all_options)
-                    
-                    # Extract newly visible options
-                    new_options = guidance.get('new_options_visible', [])
-                    if new_options:
-                        print(f"✓ Found {len(new_options)} new options:")
-                        for opt in new_options:
-                            print(f"  • {opt.get('category')} → {opt.get('component')}")
-                        all_options.extend(new_options)
-                        
-                        # If we found new options, the page definitely changed - reset counter
-                        no_change_count = 0
-                    
-                    # Check for workflow patterns
-                    workflow_pattern = guidance.get('workflow_pattern', {})
-                    self.detect_and_apply_pattern(workflow_pattern)
-                    
-                    # Check if exploration is complete
-                    if guidance.get('exploration_complete'):
-                        print("\n✓ Gemini says exploration is complete!")
-                        break
-                    
-                    # Execute action sequence (multiple actions in one iteration)
-                    actions_sequence = guidance.get('actions_sequence', [])
-                    if actions_sequence:
-                        print(f"\n→ Executing {len(actions_sequence)} action(s)...")
-                        for i, action in enumerate(actions_sequence, 1):
-                            print(f"  Action {i}: {action.get('reason')}")
-                        
-                        successful = await self.execute_action_sequence(page, actions_sequence)
-                        print(f"\n  ✓ Completed {successful}/{len(actions_sequence)} actions")
-                        
-                        # Additional wait for any animations/transitions
-                        if successful > 0:
-                            await page.wait_for_timeout(1000)
-                    else:
-                        # Fallback to old single-click recommendation
-                        click_rec = guidance.get('click_recommendation', {})
-                        if click_rec and click_rec.get('should_click'):
-                            print(f"\n→ Single action: {click_rec.get('reason')}")
-                            clicked = await self.find_and_click_element(page, click_rec)
-                            if clicked:
-                                await page.wait_for_timeout(2000)
-                        else:
-                            print("\n→ No more actions recommended")
-                            break
-                    
-                    # Update tracking at END of iteration (after actions executed)
-                    # This allows next iteration to detect if actions caused page change
-                    previous_url = page.url
-                    try:
-                        current_body = await page.inner_text('body')
-                        previous_content_hash = hash(str(await self.capture_page_state(page)))
-                        self._prev_main_text = current_body[:1000]
-                    except:
-                        pass
+                print("\n📋 PHASE 1: DISCOVERING MODELS")
+                print("="*80)
                 
+                page_state = await self.capture_page_state(page)
+                
+                print("→ Analyzing page structure...")
+                self.stats['gemini_consultations'] += 1
+                
+                analysis = self.ask_gemini_for_initial_analysis(page_state)
+                
+                # Store discovered models
+                self.all_models = analysis.get('all_models', [])
+                if not self.all_models:
+                    print("⚠️ No models discovered, treating as single-product configurator")
+                    self.all_models = [{'name': 'Default Product', 'selector_hints': {}}]
+                
+                print(f"\n✓ Discovered {len(self.all_models)} model(s):")
+                for i, model in enumerate(self.all_models, 1):
+                    print(f"  {i}. {model['name']}")
+                
+                # Cache workflow info
+                workflow_info = analysis.get('workflow_info', {})
+                if workflow_info.get('continue_button_class'):
+                    self.continue_button_class = workflow_info['continue_button_class']
+                    print(f"\n📌 Cached Continue button class: {self.continue_button_class}")
+                
+                if workflow_info.get('restart_button_text'):
+                    self.restart_button_cache = {
+                        'text_contains': workflow_info['restart_button_text'],
+                        'class_contains': workflow_info.get('restart_button_class', '')
+                    }
+                    print(f"📌 Cached Restart button: {workflow_info['restart_button_text']}")
+                
+                # Step 2: Configure each model
+                print(f"\n\n📋 PHASE 2: CONFIGURING MODELS")
+                print("="*80)
+                
+                for model_index, model in enumerate(self.all_models):
+                    model_name = model['name']
+                    
+                    if model_name in self.explored_models:
+                        print(f"\n⏭️ Skipping {model_name} (already explored)")
+                        continue
+                    
+                    self.current_model = model_name
+                    
+                    # Select model (skip for first model if already selected)
+                    if model_index > 0 or not analysis.get('first_action'):
+                        print(f"\n→ Selecting model: {model_name}")
+                        if await self.click_element(page, model.get('selector_hints', {})):
+                            await page.wait_for_timeout(2000)
+                    
+                    # Configure this model fully
+                    model_options = await self.configure_single_model(page, model_name)
+                    
+                    self.all_options.extend(model_options)
+                    self.explored_models.add(model_name)
+                    self.stats['models_completed'] += 1
+                    
+                    print(f"\n✅ Completed {model_name}: {len(model_options)} options")
+                    
+                    # If more models remain, restart
+                    if model_index < len(self.all_models) - 1:
+                        if await self.restart_to_model_selection(page):
+                            await page.wait_for_timeout(2000)
+                        else:
+                            print("⚠️ Could not restart, may need manual intervention")
+                            break
+                
+                # Final summary
                 print(f"\n{'='*80}")
                 print(f"EXTRACTION COMPLETE")
                 print(f"{'='*80}")
-                print(f"Total options discovered: {len(all_options)}")
+                print(f"Total models configured: {len(self.explored_models)}/{len(self.all_models)}")
+                print(f"Total options extracted: {len(self.all_options)}")
+                
+                print(f"\n{'='*80}")
+                print("OPTIMIZATION STATISTICS")
+                print(f"{'='*80}")
+                print(f"Total iterations:        {self.stats['total_iterations']}")
+                print(f"Gemini consultations:    {self.stats['gemini_consultations']}")
+                print(f"Cached navigations:      {self.stats['cached_navigations']}")
+                
+                if self.stats['total_iterations'] > 0:
+                    reduction = (self.stats['total_iterations'] - self.stats['gemini_consultations']) / self.stats['total_iterations']
+                    print(f"API call reduction:      {reduction:.1%}")
+                    
+                    cost_per_call = 0.15
+                    total_cost = self.stats['gemini_consultations'] * cost_per_call
+                    without_cache = self.stats['total_iterations'] * cost_per_call
+                    savings = without_cache - total_cost
+                    print(f"Estimated cost:          ${total_cost:.2f}")
+                    print(f"Estimated savings:       ${savings:.2f}")
+                
+                print(f"{'='*80}\n")
                 
             except Exception as e:
-                print(f"\n✗ Error during extraction: {e}")
+                print(f"\n✗ Error: {e}")
                 import traceback
                 traceback.print_exc()
             finally:
                 await browser.close()
         
-        return all_options
+        return self.all_options
     
     def save_results(self, options: List[Dict], url: str) -> Tuple[str, str]:
         """Save results to JSON and CSV"""
@@ -630,90 +623,68 @@ Only return valid JSON.
         
         timestamp = int(time.time())
         
-        # Save JSON
-        json_filename = f"interactive_extraction_{timestamp}.json"
+        # JSON
+        json_filename = f"multi_model_extraction_{timestamp}.json"
         result = {
             'url': url,
             'extracted_at': time.strftime('%Y-%m-%d %H:%M:%S'),
-            'method': 'gemini-interactive',
+            'method': 'gemini-multi-model',
+            'total_models': len(self.all_models),
+            'models_explored': len(self.explored_models),
             'total_options': len(options),
+            'models': [m['name'] for m in self.all_models],
             'options': options
         }
         
         with open(json_filename, 'w', encoding='utf-8') as f:
             json.dump(result, f, indent=2, ensure_ascii=False)
         
-        # Save CSV
-        csv_filename = f"interactive_extraction_{timestamp}.csv"
+        # CSV
+        csv_filename = f"multi_model_extraction_{timestamp}.csv"
         with open(csv_filename, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=['Categories', 'Component', 'Price', 'References', 'Image'])
+            fieldnames = ['Model', 'Category', 'Component', 'Price', 'Reference', 'Image']
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             
             for opt in options:
                 writer.writerow({
-                    'Categories': opt.get('category', ''),
+                    'Model': opt.get('model', ''),
+                    'Category': opt.get('category', ''),
                     'Component': opt.get('component', ''),
                     'Price': opt.get('price', 'N/A'),
-                    'References': opt.get('reference', ''),
+                    'Reference': opt.get('reference', ''),
                     'Image': opt.get('image', '')
                 })
         
         return json_filename, csv_filename
-    
-    def print_summary(self, options: List[Dict]):
-        """Print summary of extracted options"""
-        print(f"\n{'='*80}")
-        print("SALES QUOTATION - EXTRACTED OPTIONS")
-        print(f"{'='*80}\n")
-        
-        print(f"{'Categories':<30} {'Component':<30} {'Price':<10} {'References':<30}")
-        print(f"{'='*80}")
-        
-        current_category = None
-        for opt in options:
-            category = opt.get('category', '')
-            component = opt.get('component', '')
-            price = opt.get('price', 'N/A')
-            reference = opt.get('reference', '')[:30]
-            
-            if category != current_category:
-                print(f"{category:<30} {component:<30} {price:<10} {reference}")
-                current_category = category
-            else:
-                print(f"{'':<30} {component:<30} {price:<10} {reference}")
-        
-        print(f"{'='*80}")
-        print(f"Total: {len(options)} options")
-        print(f"{'='*80}\n")
 
 
 async def main():
     """Main entry point"""
     if len(sys.argv) < 2:
-        print("Usage: python gemini_interactive_extractor.py <url> [max_iterations]")
+        print("Usage: python gemini_multi_model_extractor.py <url> [max_iterations]")
         print("\nExample:")
-        print("  python gemini_interactive_extractor.py https://www.newmarcorp.com/configure-customization/build-your-coach 20")
+        print("  python gemini_multi_model_extractor.py https://example.com/configurator 100")
         sys.exit(1)
     
     url = sys.argv[1]
-    max_iterations = int(sys.argv[2]) if len(sys.argv) > 2 else 15
+    max_iterations = int(sys.argv[2]) if len(sys.argv) > 2 else 100
     
     try:
-        extractor = GeminiInteractiveExtractor()
+        extractor = GeminiMultiModelExtractor()
         options = await extractor.interactive_extraction(url, max_iterations)
         
         if options:
-            extractor.print_summary(options)
             json_file, csv_file = extractor.save_results(options, url)
-            print(f"✓ Results saved to:")
-            print(f"  - {json_file}")
-            print(f"  - {csv_file}")
+            print(f"\n✓ Results saved:")
+            print(f"  JSON: {json_file}")
+            print(f"  CSV: {csv_file}")
         else:
-            print("\n⚠ No options were extracted")
+            print("\n⚠ No options extracted")
         
     except ValueError as e:
         print(f"\n❌ Error: {e}")
-        print("\nSet GEMINI_API_KEY in your .env file")
+        print("\nSet GEMINI_API_KEY in .env file")
         sys.exit(1)
     except Exception as e:
         print(f"\n❌ Error: {e}")

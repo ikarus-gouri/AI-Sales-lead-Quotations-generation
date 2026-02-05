@@ -143,12 +143,33 @@ class PlaywrightEngine:
                         }
                     });
                     
-                    // Kill cookie banners
-                    const cookieSelectors = ['[class*=\"cookie\"]', '[id*=\"cookie\"]', '[class*=\"gdpr\"]'];
+                    // Kill cookie banners - Enhanced
+                    const cookieSelectors = [
+                        '[class*="cookie"]', '[id*="cookie"]', '[class*="gdpr"]',
+                        '[class*="consent"]', '[id*="consent"]', '[class*="privacy"]',
+                        '[aria-label*="cookie"]', '[aria-label*="consent"]'
+                    ];
                     cookieSelectors.forEach(sel => {
                         document.querySelectorAll(sel).forEach(el => {
-                            if (el.offsetHeight > 50) {  // Only large overlays
-                                el.style.display = 'none';
+                            // Remove all cookie-related elements, not just large overlays
+                            el.style.display = 'none';
+                            el.remove();
+                        });
+                    });
+                    
+                    // Auto-accept cookie buttons
+                    const acceptButtons = [
+                        'button[class*="accept"]', 'button[id*="accept"]',
+                        'button[class*="agree"]', 'button[id*="agree"]',
+                        'a[class*="accept"]', 'a[id*="accept"]',
+                        '[onclick*="accept"]', '[onclick*="agree"]'
+                    ];
+                    acceptButtons.forEach(sel => {
+                        document.querySelectorAll(sel).forEach(button => {
+                            const text = button.textContent.toLowerCase();
+                            if (text.includes('accept') || text.includes('agree') || 
+                                text.includes('ok') || text.includes('continue')) {
+                                try { button.click(); } catch(e) {}
                             }
                         });
                     });
@@ -214,12 +235,33 @@ class BrowserRunner:
                         }
                     });
                     
-                    // Kill cookie banners
-                    const cookieSelectors = ['[class*="cookie"]', '[id*="cookie"]', '[class*="gdpr"]'];
+                    // Kill cookie banners - Enhanced
+                    const cookieSelectors = [
+                        '[class*="cookie"]', '[id*="cookie"]', '[class*="gdpr"]',
+                        '[class*="consent"]', '[id*="consent"]', '[class*="privacy"]',
+                        '[aria-label*="cookie"]', '[aria-label*="consent"]'
+                    ];
                     cookieSelectors.forEach(sel => {
                         document.querySelectorAll(sel).forEach(el => {
-                            if (el.offsetHeight > 50) {  // Only large overlays
-                                el.style.display = 'none';
+                            // Remove all cookie-related elements, not just large overlays
+                            el.style.display = 'none';
+                            el.remove();
+                        });
+                    });
+                    
+                    // Auto-accept cookie buttons
+                    const acceptButtons = [
+                        'button[class*="accept"]', 'button[id*="accept"]',
+                        'button[class*="agree"]', 'button[id*="agree"]',
+                        'a[class*="accept"]', 'a[id*="accept"]',
+                        '[onclick*="accept"]', '[onclick*="agree"]'
+                    ];
+                    acceptButtons.forEach(sel => {
+                        document.querySelectorAll(sel).forEach(button => {
+                            const text = button.textContent.toLowerCase();
+                            if (text.includes('accept') || text.includes('agree') || 
+                                text.includes('ok') || text.includes('continue')) {
+                                try { button.click(); } catch(e) {}
                             }
                         });
                     });

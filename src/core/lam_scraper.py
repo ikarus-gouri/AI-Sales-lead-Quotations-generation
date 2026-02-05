@@ -477,7 +477,7 @@ Only return valid JSON.
             # Use Gemini interactive extractor (async)
             options = await self.gemini_extractor.interactive_extraction(
                 url,
-                max_iterations=10
+                max_iterations=20
             )
             
             if options:

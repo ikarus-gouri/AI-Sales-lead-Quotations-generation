@@ -481,46 +481,87 @@ class GoogleSheetsStorage:
             customizations = product_data.get('customizations', {})
             color_cell_map = []  # Track which cells need color formatting: [(row, col, hex_color)]
             
+            # Group options by model (if model field exists)
+            model_grouped = {}
             for category, options in customizations.items():
                 if not options:
                     continue
-                    
-                for i, option in enumerate(options):
-                    # Handle both dict and string option types
+                
+                for option in options:
                     if isinstance(option, dict):
-                        label = option.get('label', str(option))
-                        price = option.get('price', '')
-                        image = option.get('image', '')
-                        hex_color = option.get('hex_color', '')
+                        model_key = option.get('model', 'General')  # Group by model or 'General' if no model
                     else:
-                        label = str(option)
-                        price = ''
-                        image = ''
-                        hex_color = ''
+                        model_key = 'General'
                     
-                    current_row = len(rows) + 1  # +1 for header row
-                    
+                    if model_key not in model_grouped:
+                        model_grouped[model_key] = {}
+                    if category not in model_grouped[model_key]:
+                        model_grouped[model_key][category] = []
+                    model_grouped[model_key][category].append(option)
+            
+            # Output grouped by model
+            for model_key in sorted(model_grouped.keys()):
+                # Add model header if there are multiple models
+                if len(model_grouped) > 1:
+                    rows.append(['', '', '', '', '', ''])  # Spacing
                     if include_prices:
                         rows.append([
-                            category if i == 0 else '',
-                            label,
-                            price,
-                            image,
-                            f"Category: {category}",
+                            f"═══ {model_key} ═══",
+                            '',
+                            '',
+                            '',
+                            f'Model Configuration',
                             ''
                         ])
-                        # Track color cell (column B = index 1, 0-indexed)
-                        if hex_color:
-                            color_cell_map.append((current_row, 1, hex_color))
                     else:
                         rows.append([
-                            category if i == 0 else '',
-                            label,
-                            image,
-                            ''
+                            f"═══ {model_key} ═══",
+                            '',
+                            '',
+                            f'Model Configuration'
                         ])
-                        if hex_color:
-                            color_cell_map.append((current_row, 1, hex_color))
+                
+                # Output categories for this model
+                for category, options in model_grouped[model_key].items():
+                    if not options:
+                        continue
+                        
+                    for i, option in enumerate(options):
+                        # Handle both dict and string option types
+                        if isinstance(option, dict):
+                            label = option.get('label', str(option))
+                            price = option.get('price', '')
+                            image = option.get('image', '')
+                            hex_color = option.get('hex_color', '')
+                        else:
+                            label = str(option)
+                            price = ''
+                            image = ''
+                            hex_color = ''
+                        
+                        current_row = len(rows) + 1  # +1 for header row
+                        
+                        if include_prices:
+                            rows.append([
+                                category if i == 0 else '',
+                                label,
+                                price,
+                                image,
+                                f"Category: {category}",
+                                ''
+                            ])
+                            # Track color cell (column B = index 1, 0-indexed)
+                            if hex_color:
+                                color_cell_map.append((current_row, 1, hex_color))
+                        else:
+                            rows.append([
+                                category if i == 0 else '',
+                                label,
+                                image,
+                                ''
+                            ])
+                            if hex_color:
+                                color_cell_map.append((current_row, 1, hex_color))
         
         # Header row
         header = ['Categories', 'Component', 'Price', 'Image', 'Notes', 'References'] if include_prices else ['Categories', 'Component', 'Image', 'References']
