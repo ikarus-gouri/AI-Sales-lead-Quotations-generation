@@ -18,7 +18,7 @@ class ScraperConfig:
     """Configuration for the web scraper."""
     
     # Target website
-    base_url: str = "https://casarista.com/"
+    base_url: str = "https://eg.com/"
     
     # Crawling settings
     max_pages: int = 50
@@ -31,7 +31,7 @@ class ScraperConfig:
     # AI settings
     use_ai_classification: bool = False
     gemini_api_key: Optional[str] = None
-    gemini_model: str = "models/gemini-2.0-flash-exp"
+    gemini_model: str = "gemini-2.5-flash"
     
     # Storage settings
     output_dir: str = "data/catalogs"
@@ -39,6 +39,15 @@ class ScraperConfig:
     
     # Jina AI settings
     jina_api_url: str = "https://r.jina.ai/"
+    
+    # Cache settings
+    use_cache: bool = True  # Enable/disable HTTP caching
+    
+    # Intent-driven LAM settings
+    user_intent: Optional[str] = None  # Natural language intent for LAM model
+    max_variants_per_model: int = 50   # Max variants to explore per model (LAM guardrail)
+    time_budget: int = 300             # Max session duration in seconds (LAM guardrail)
+    confidence_threshold: float = 0.7  # Minimum extraction confidence (LAM guardrail)
     
     def __post_init__(self):
         """Initialize configuration from environment variables."""

@@ -20,6 +20,7 @@ class ProductExtractor:
         self.enable_color_extraction = enable_color_extraction
         self.price_extractor = PriceExtractor()
         self.specs_extractor = SpecsExtractor()
+        self._title_embedded_price = None  # Store price extracted from title
 
         if self.enable_color_extraction:
             self.color_extractor = ColorExtractor(
@@ -33,11 +34,18 @@ class ProductExtractor:
 
     def extract_product_name(self, url: str, markdown: str) -> str:
         """Extract product name from markdown or URL, removing any embedded prices."""
+        self._title_embedded_price = None  # Reset for each extraction
+        
         for line in markdown.split('\n'):
             line = line.strip()
             if line.startswith('# ') or line.startswith('## '):
                 title = line.lstrip('#').strip()
                 if len(title) > 3 and 'skip' not in title.lower() and 'content' not in title.lower():
+                    # Extract price from title BEFORE stripping it
+                    title_price = self.price_extractor.extract_price_from_text(title)
+                    if title_price:
+                        self._title_embedded_price = title_price
+                    
                     # Remove price patterns from title
                     clean_title = self._strip_price_from_text(title)
                     return clean_title.strip()
@@ -51,7 +59,11 @@ class ProductExtractor:
         # First try standard price extraction
         price = self.price_extractor.extract_base_price(markdown)
         
-        # If not found, check product title for embedded price
+        # If not found, use price extracted from title during name extraction
+        if not price and self._title_embedded_price:
+            return self._title_embedded_price
+        
+        # Final fallback: check product title for embedded price
         if not price:
             for line in markdown.split('\n')[:10]:  # Check first 10 lines
                 line = line.strip()

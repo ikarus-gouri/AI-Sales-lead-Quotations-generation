@@ -4,6 +4,7 @@ import time
 import re
 from typing import Dict, List, Optional
 from urllib.parse import urlparse
+from .price_extractor import PriceExtractor
 
 
 class ExternalConfiguratorScraper:
@@ -19,6 +20,7 @@ class ExternalConfiguratorScraper:
         """
         self.http_client = http_client
         self.product_extractor = product_extractor
+        self.price_extractor = PriceExtractor()
     
     def scrape_external_configurator(
         self, 
@@ -79,6 +81,11 @@ class ExternalConfiguratorScraper:
             # Try custom extraction first (for Jina markdown format)
             customizations = self._extract_customizations_from_markdown(markdown)
             
+            # Extract base price if present
+            base_price = self.price_extractor.extract_base_price(markdown)
+            if base_price:
+                print(f"     💰 Base price detected: {base_price}")
+            
             # If custom extraction didn't work, fallback to product_extractor
             if not customizations:
                 print(f"     → Trying product extractor fallback...")
@@ -93,6 +100,10 @@ class ExternalConfiguratorScraper:
             # Check if we found any customizations
             if customizations:
                 result['success'] = True
+                result['customizations'] = customizations
+                
+                # Validate and clean up prices in customizations
+                customizations = self._validate_and_clean_prices(customizations)
                 result['customizations'] = customizations
                 
                 total_options = sum(len(opts) for opts in customizations.values())
@@ -143,7 +154,7 @@ class ExternalConfiguratorScraper:
             'recently viewed', 'suggested', 'popular', 'trending',
             'total price', 'quote request', 'sample', 'cookie', 'privacy',
             'terms', 'shipping', 'returns', 'size guide', 'bat.bing',
-            'tracking', 'analytics', 'social', 'newsletter'
+            'tracking', 'analytics', 'social', 'newsletter', 'warning'
         ]
         
         while i < len(lines):
@@ -242,28 +253,35 @@ class ExternalConfiguratorScraper:
         option_label = alt_text
         price = None
         
-        # Look ahead for price modifier on next line
-        if index + 1 < len(lines):
-            next_line = lines[index + 1].strip()
-            if next_line.startswith('+$'):
-                price = next_line
-        
-        # Look ahead for standalone option text (more descriptive than alt text)
-        if index + 1 < len(lines):
-            next_line = lines[index + 1].strip()
-            if next_line and not next_line.startswith(('+$', '![Image', '#', '**', '-', '*', '|')):
-                if len(next_line) < 200:  # Reasonable option name length
-                    option_label = next_line
-                    # Check for price after standalone text
-                    if index + 2 < len(lines) and lines[index + 2].strip().startswith('+$'):
-                        price = lines[index + 2].strip()
-        
-        # Extract price from alt text if present
-        price_match = re.search(r'\+?\$[\d,]+(?:\.\d{2})?', alt_text)
-        if price_match and not price:
-            price = price_match.group(0)
-            # Clean label by removing price
-            option_label = re.sub(r'\s*\+?\$[\d,]+(?:\.\d{2})?\s*', '', option_label).strip()
+        # Try to extract option name and price together using PriceExtractor
+        option_info = self.price_extractor.extract_option_with_price(alt_text)
+        if option_info:
+            option_label = option_info.option_name
+            price = option_info.price_modifier
+        else:
+            # Look ahead for price modifier on next line
+            if index + 1 < len(lines):
+                next_line = lines[index + 1].strip()
+                price = self.price_extractor.extract_option_price(next_line)
+            
+            # Look ahead for standalone option text (more descriptive than alt text)
+            if index + 1 < len(lines):
+                next_line = lines[index + 1].strip()
+                if next_line and not next_line.startswith(('![Image', '#', '**', '-', '*', '|')):
+                    if len(next_line) < 200:  # Reasonable option name length
+                        # Try to extract from combined text
+                        combined_info = self.price_extractor.extract_option_with_price(next_line)
+                        if combined_info:
+                            option_label = combined_info.option_name
+                            price = combined_info.price_modifier
+                        else:
+                            option_label = next_line
+                            # Check for price after standalone text
+                            if index + 2 < len(lines):
+                                price_line = lines[index + 2].strip()
+                                extracted_price = self.price_extractor.extract_option_price(price_line)
+                                if extracted_price:
+                                    price = extracted_price
         
         if len(option_label) < 200:  # Validate length
             return {
@@ -281,17 +299,13 @@ class ExternalConfiguratorScraper:
         if not option_text or len(option_text) > 200:
             return None
         
-        # Extract price if present
-        price_match = re.search(r'\+?\$[\d,]+(?:\.\d{2})?', option_text)
-        price = price_match.group(0) if price_match else None
+        # Use PriceExtractor to parse option name and price
+        option_name, price_modifier = self.price_extractor.parse_option_text(option_text)
         
-        # Clean label
-        label = re.sub(r'\s*\+?\$[\d,]+(?:\.\d{2})?\s*', '', option_text).strip()
-        
-        if label and len(label) > 2:
+        if option_name and len(option_name) > 2:
             return {
-                "label": label,
-                "price": price,
+                "label": option_name,
+                "price": price_modifier,
                 "image": None
             }
         
@@ -316,18 +330,54 @@ class ExternalConfiguratorScraper:
         if len(parts) > 1 and parts[1].strip():
             option_text = parts[1].strip()
             if len(option_text) < 200:
-                # Extract price if present
-                price_match = re.search(r'\+?\$[\d,]+(?:\.\d{2})?', option_text)
-                price = price_match.group(0) if price_match else None
-                label = re.sub(r'\s*\+?\$[\d,]+(?:\.\d{2})?\s*', '', option_text).strip()
+                # Use PriceExtractor to parse option name and price
+                option_name, price_modifier = self.price_extractor.parse_option_text(option_text)
                 
                 result['option'] = {
-                    "label": label,
-                    "price": price,
+                    "label": option_name,
+                    "price": price_modifier,
                     "image": None
                 }
         
         return result
+    
+    def _validate_and_clean_prices(self, customizations: Dict[str, List[Dict]]) -> Dict[str, List[Dict]]:
+        """
+        Validate and clean prices in customization options.
+        
+        Args:
+            customizations: Dictionary of categories and their options
+            
+        Returns:
+            Cleaned customizations with validated prices
+        """
+        cleaned = {}
+        
+        for category, options in customizations.items():
+            cleaned_options = []
+            
+            for option in options:
+                # Validate price if present
+                if option.get('price'):
+                    price_str = option['price']
+                    
+                    # Validate price is reasonable (between $0 and $100,000)
+                    if self.price_extractor.validate_price(price_str, min_value=0, max_value=100000):
+                        cleaned_options.append(option)
+                    else:
+                        # Keep option but remove invalid price
+                        print(f"     ⚠ Invalid price '{price_str}' for option '{option.get('label')}' - removing price")
+                        option_copy = option.copy()
+                        option_copy['price'] = None
+                        cleaned_options.append(option_copy)
+                else:
+                    # No price, keep as is
+                    cleaned_options.append(option)
+            
+            if cleaned_options:
+                cleaned[category] = cleaned_options
+        
+        return cleaned
     
     def _is_javascript_heavy(self, markdown: str) -> bool:
         """

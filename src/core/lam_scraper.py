@@ -161,7 +161,8 @@ class LAMScraper(BalancedScraper):
         config: ScraperConfig,
         strictness: str = "balanced",
         enable_gemini: bool = True,
-        gemini_api_key: Optional[str] = None
+        gemini_api_key: Optional[str] = None,
+        force_ai: bool = False
     ):
         """
         Initialize LAM scraper.
@@ -171,12 +172,14 @@ class LAMScraper(BalancedScraper):
             strictness: Classification strictness
             enable_gemini: Enable Gemini interactive extraction
             gemini_api_key: Optional Gemini API key
+            force_ai: Force Gemini AI extraction even for static sites
         """
         # Initialize parent (BalancedScraper)
         super().__init__(config, strictness=strictness)
         
         # Initialize Gemini components
         self.enable_gemini = enable_gemini
+        self.force_ai = force_ai
         self.gemini_consultant = GeminiConfiguatorConsultant(gemini_api_key)
         self.gemini_extractor = None
         
@@ -496,14 +499,23 @@ Only return valid JSON.
             print(f"    ✗ Gemini+Playwright extraction failed: {e}")
             return {'success': False, 'customizations': {}, 'error': str(e)}
     
-    async def scrape_all_products(self) -> Dict:
-        """Enhanced LAM workflow: Identify pages → Detect configurators → Extract."""
+    async def scrape_all_products(self, product_urls: List[str] = None) -> Dict:
+        """Enhanced LAM workflow: Get product URLs → Detect configurators → Extract.
+        
+        Args:
+            product_urls: Optional pre-discovered product URLs (from any crawler)
+                         If None, uses identify_all_product_pages() to discover
+        """
         print(f"\n{'='*80}")
         print(f"[LAM MODEL] Starting Enhanced Workflow")
         print(f"{'='*80}")
         
-        # Step 1: Identify all product pages
-        product_urls = self.identify_all_product_pages()
+        # Step 1: Get product URLs (either provided or discover)
+        if product_urls is None:
+            product_urls = self.identify_all_product_pages()
+        else:
+            product_urls = list(product_urls)
+            print(f"\nUsing {len(product_urls)} pre-discovered product URLs")
         
         if not product_urls:
             print("\n❌ No product pages found")
@@ -515,10 +527,11 @@ Only return valid JSON.
         # Check if any configurators were found
         configurators_found = sum(1 for c in configurator_map.values() if c['has_configurator'])
         
-        if configurators_found == 0:
+        if configurators_found == 0 and not self.force_ai:
             print(f"\n{'⚠️'*40}")
             print(f"⚠️  NO CONFIGURATORS DETECTED")
             print(f"⚠️  Automatically switching to Model S (Static Extraction)")
+            print(f"⚠️  (Use --forceai to force Gemini extraction)")
             print(f"{'⚠️'*40}\n")
             
             # Fall back to parent class (BalancedScraper = Model S) workflow
@@ -550,6 +563,12 @@ Only return valid JSON.
             print(f"  Total products: {len(products)}")
             
             return catalog
+        
+        elif configurators_found == 0 and self.force_ai:
+            print(f"\n{'🤖'*40}")
+            print(f"🤖  NO CONFIGURATORS DETECTED")
+            print(f"🤖  FORCE AI MODE ENABLED - Using Gemini for all pages")
+            print(f"{'🤖'*40}\n")
         
         # Step 3: Extract from each product
         print(f"\n{'='*80}")

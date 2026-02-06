@@ -357,10 +357,12 @@ class PriceExtractor:
         Returns:
             Formatted price string or None
         """
+        print(f"\033[34m Extracting price from text: {text[:60]}... \033[0m")
         for pattern in self.compiled_patterns:
             match = pattern.search(text)
             if match:
                 price_info = self._parse_price_match(match)
+                print("\033[32m Price match found: \033[0m", price_info)
                 if price_info and price_info.numeric_value:
                     return self._format_price(price_info.numeric_value, price_info.currency)
         

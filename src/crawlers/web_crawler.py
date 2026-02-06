@@ -88,7 +88,7 @@ class WebCrawler:
         if '/wp-content/uploads/' in url_lower:
             return (True, "wordpress_upload")
         
-        # Check for common non-page URLs
+        # Check for common non-page URLs (expanded to match HTTPClient blocklist)
         skip_patterns = {
             '/feed/': 'rss_feed',
             '/rss/': 'rss_feed',
@@ -96,14 +96,31 @@ class WebCrawler:
             '/xmlrpc.php': 'xml_rpc',
             '/wp-login.php': 'login_page',
             '/wp-admin/': 'admin_page',
+            '/login': 'login_page',
+            '/signin': 'login_page',
+            '/sign-in': 'login_page',
             '/cart/': 'cart_page',
+            '/basket': 'cart_page',
             '/checkout/': 'checkout_page',
+            '/payment': 'checkout_page',
             '/my-account/': 'account_page',
+            '/account': 'account_page',
+            '/profile': 'account_page',
             '/customer-service/': 'service_page',
+            '/help': 'service_page',
+            '/support': 'service_page',
+            '/contact': 'contact_page',
+            '/about-us': 'info_page',
             '/privacy-policy': 'policy_page',
+            '/privacy': 'policy_page',
             '/terms-of-service': 'policy_page',
+            '/terms': 'policy_page',
+            '/conditions': 'policy_page',
             '/returns': 'policy_page',
-            '/shipping': 'policy_page'
+            '/shipping': 'policy_page',
+            '/faq': 'faq_page',
+            '/sitemap': 'sitemap',
+            '/robots.txt': 'robots'
         }
         
         for pattern, reason in skip_patterns.items():
@@ -130,10 +147,15 @@ class WebCrawler:
         - Trailing slashes (standardize)
         - Query parameters (usually not needed)
         - URL fragments (#section)
+        
+        Lowercases domain for consistency.
         """
         from urllib.parse import urlparse, urlunparse
         
         parsed = urlparse(url)
+        
+        # Lowercase domain for consistency
+        netloc = parsed.netloc.lower()
         
         # Remove trailing slash from path
         path = parsed.path.rstrip('/')
@@ -141,7 +163,7 @@ class WebCrawler:
         # Reconstruct without query/fragment
         normalized = urlunparse((
             parsed.scheme,
-            parsed.netloc,
+            netloc,
             path,
             '',  # No params
             '',  # No query (comment this out if you need query params)
@@ -257,6 +279,10 @@ class WebCrawler:
             # Extract links with error handling
             try:
                 links = self.link_extractor.extract_from_markdown(markdown, current_url)
+                
+                # De-duplicate URLs BEFORE processing (prevents 429 spikes)
+                links = list(set(links))
+                
             except Exception as e:
                 links = []
                 self.failed_urls[current_url] = f"link_extraction_error: {e}"

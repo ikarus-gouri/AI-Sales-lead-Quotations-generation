@@ -43,7 +43,7 @@ class BalancedScraper:
         strictness_level = strictness_map.get(strictness.lower(), StrictnessLevel.BALANCED)
         
         # Initialize components
-        self.http_client = HTTPClient(timeout=config.request_timeout)
+        self.http_client = HTTPClient(timeout=config.request_timeout, use_cache=config.use_cache)
         self.link_extractor = LinkExtractor()
         self.product_extractor = ProductExtractor()
         self.configurator_detector = ConfiguratorDetector()
@@ -58,6 +58,7 @@ class BalancedScraper:
         print(f"✓ Using BALANCED classifier (strictness: {strictness_level.value})")
         print(f"  Threshold: {self.classifier.PRODUCT_THRESHOLD}")
         print(f"  Content signals required: {self.classifier.CONTENT_SIGNAL_REQUIREMENT}")
+        print(f"  HTTP Cache: {'enabled' if config.use_cache else 'disabled'}")
         
         # Initialize crawler
         self.crawler = WebCrawler(
@@ -219,9 +220,13 @@ class BalancedScraper:
         
         return product_data
     
-    def scrape_all_products(self) -> Dict[str, Dict]:
+    def scrape_all_products(self, product_urls: set = None) -> Dict[str, Dict]:
         """
-        Main method: crawl website and scrape all products.
+        Main method: scrape all products.
+        
+        Args:
+            product_urls: Optional pre-discovered product URLs (from any crawler)
+                         If None, uses WebCrawler to discover URLs
         
         Returns:
             Complete product catalog
@@ -233,11 +238,14 @@ class BalancedScraper:
         print(f"Threshold: {self.classifier.PRODUCT_THRESHOLD}")
         print("="*80)
         
-        # Step 1: Crawl and discover product pages
-        product_urls = self.crawler.crawl(
-            max_pages=self.config.max_pages,
-            max_depth=self.config.max_depth
-        )
+        # Step 1: Get product URLs (either provided or crawl)
+        if product_urls is None:
+            product_urls = self.crawler.crawl(
+                max_pages=self.config.max_pages,
+                max_depth=self.config.max_depth
+            )
+        else:
+            print(f"\nUsing {len(product_urls)} pre-discovered product URLs")
         
         if not product_urls:
             print("\n⚠️  No product pages found!")

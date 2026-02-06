@@ -143,3 +143,66 @@ class URLUtils:
         if segments:
             return segments[segment]
         return ""
+
+
+# Standalone helper functions for convenience
+def normalize_url(url: str) -> str:
+    """
+    Normalize URL by removing fragments, standardizing format.
+    
+    Args:
+        url: URL to normalize
+        
+    Returns:
+        Normalized URL or None if invalid
+    """
+    if not url or url.startswith('#') or url.startswith('mailto:'):
+        return None
+    
+    try:
+        parsed = urlparse(url)
+        
+        # Must have scheme and netloc
+        if not parsed.scheme or not parsed.netloc:
+            return None
+        
+        # Lowercase domain
+        netloc = parsed.netloc.lower()
+        
+        # Remove trailing slash from path
+        path = parsed.path.rstrip('/')
+        
+        # Reconstruct without fragment
+        from urllib.parse import urlunparse
+        normalized = urlunparse((
+            parsed.scheme,
+            netloc,
+            path,
+            parsed.params,
+            parsed.query,
+            ''  # No fragment
+        ))
+        
+        return normalized
+    
+    except Exception:
+        return None
+
+
+def same_domain(url1: str, url2: str) -> bool:
+    """
+    Check if two URLs are from the same domain.
+    
+    Args:
+        url1: First URL
+        url2: Second URL
+        
+    Returns:
+        True if same domain, False otherwise
+    """
+    try:
+        domain1 = urlparse(url1).netloc.lower()
+        domain2 = urlparse(url2).netloc.lower()
+        return domain1 == domain2
+    except Exception:
+        return False

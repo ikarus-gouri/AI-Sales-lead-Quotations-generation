@@ -101,8 +101,18 @@ class ScrapeRequest(BaseModel):
     crawl_delay: float = Field(0.5, ge=0.1, le=5.0)
     export_formats: List[str] = ["json"]
     strictness: str = Field("balanced", pattern="^(lenient|balanced|strict)$")
-    model: str = Field("S", pattern="^(S|LAM)$", description="Scraping model: S (static) or LAM (Gemini + Playwright)")
+    
+    # New decoupled parameters
+    crawler: Optional[str] = Field(None, pattern="^(web|ai|unified)?$", description="Crawler type: web (traditional), ai (Gemini-powered), or unified (discover + filter)")
+    scraper: Optional[str] = Field(None, pattern="^(static|lam|ai)?$", description="Scraper type: static (HTML), lam (Gemini+Playwright), or ai (AI extraction)")
+    
+    # Legacy parameter (backward compatibility)
+    model: Optional[str] = Field(None, pattern="^(S|LAM|AI)?$", description="[DEPRECATED] Use crawler + scraper instead")
+    
     headless: bool = Field(True, description="Deprecated parameter (no browser mode)")
+    force_ai: bool = Field(False, description="Force Gemini AI extraction even for static sites (LAM scraper only)")
+    use_cache: bool = Field(True, description="Enable HTTP response caching (speeds up re-scraping)")
+    intent: Optional[str] = Field(None, description="User intent for AI crawler or LAM/AI scraper")
     google_sheets_upload: bool = Field(False, description="Upload results to Google Sheets")
     google_sheets_id: Optional[str] = Field(None, description="Existing spreadsheet ID (uses env default if not provided)")
 
@@ -115,8 +125,12 @@ class ScrapeRequest(BaseModel):
                 "crawl_delay": 0.5,
                 "export_formats": ["json", "csv"],
                 "strictness": "balanced",
-                "model": "LAM",
+                "crawler": "unified",
+                "scraper": "lam",
                 "headless": False,
+                "force_ai": False,
+                "use_cache": True,
+                "intent": "Extract all products with customization options and prices",
                 "google_sheets_upload": False,
                 "google_sheets_id": None
             }
@@ -156,13 +170,33 @@ class GoogleSheetsUploadRequest(BaseModel):
 # ============================================================
 
 async def run_scraper_job_async(job_id: str, request: ScrapeRequest):
-    """Execute scraping job (supports LAM with Gemini + Playwright or static S)"""
+    """Execute scraping job with decoupled crawler/scraper architecture"""
     try:
+        # Handle backward compatibility: map model to crawler/scraper
+        crawler = request.crawler
+        scraper = request.scraper
+        
+        if request.model and not (crawler and scraper):
+            model_map = {
+                'S': ('web', 'static'),
+                'LAM': ('unified', 'lam'),
+                'AI': ('unified', 'ai')
+            }
+            if request.model in model_map:
+                crawler, scraper = model_map[request.model]
+        
+        # Default to web crawler + static scraper if nothing specified
+        if not crawler:
+            crawler = 'web'
+        if not scraper:
+            scraper = 'static'
+        
         jobs[job_id]["status"] = "running"
-        jobs[job_id]["message"] = f"Scraping started (model: {request.model}, strictness: {request.strictness})"
+        jobs[job_id]["message"] = f"Scraping started (crawler: {crawler}, scraper: {scraper})"
         jobs[job_id]["progress"] = {
             "stage": "initializing",
-            "model": request.model,
+            "crawler": crawler,
+            "scraper": scraper,
             "strictness": request.strictness
         }
 
@@ -174,46 +208,149 @@ async def run_scraper_job_async(job_id: str, request: ScrapeRequest):
             crawl_delay=request.crawl_delay,
             output_dir=RESULTS_DIR,
             output_filename=f"{job_id}.json",
+            use_cache=request.use_cache,
+            user_intent=request.intent,
         )
-
-        # Choose scraper based on model
-        if request.model == "LAM":
+        
+        # Step 1: Run Crawler
+        product_urls = None
+        
+        if crawler == 'unified':
+            # New unified crawler: discover + filter
             try:
-                from src.core.lam_scraper import LAMScraper
-                scraper = LAMScraper(config, strictness=request.strictness, enable_gemini=True)
-                model_used = "LAM"
+                from src.crawlers.crawler import Crawler
+                from src.utils.http_client import HTTPClient
+                from src.extractors.link_extractor import LinkExtractor
+                import os
+                
+                gemini_key = os.getenv('GEMINI_API_KEY') or os.getenv('GEMINAI_API_KEY')
+                if not gemini_key:
+                    raise ValueError("GEMINI_API_KEY required for unified crawler")
                 
                 jobs[job_id]["progress"] = {
-                    "stage": "identifying",
-                    "message": "[LAM Step 1] Identifying all product pages",
-                    "model": "LAM"
+                    "stage": "crawling",
+                    "message": "Phase 1: Discovering URLs...",
+                    "crawler": "unified"
+                }
+                
+                http_client = HTTPClient(use_cache=config.use_cache)
+                link_extractor = LinkExtractor()
+                unified_crawler = Crawler(
+                    base_url=config.base_url,
+                    http_client=http_client,
+                    link_extractor=link_extractor,
+                    gemini_api_key=gemini_key,
+                    crawl_delay=config.crawl_delay
+                )
+                
+                # Phase 1: Discover all URLs
+                all_urls = unified_crawler.discover(
+                    max_pages=config.max_pages,
+                    max_depth=config.max_depth
+                )
+                
+                jobs[job_id]["progress"] = {
+                    "stage": "filtering",
+                    "message": f"Phase 2: Filtering {len(all_urls)} URLs with Gemini...",
+                    "crawler": "unified"
+                }
+                
+                # Phase 2: Filter by intent
+                if request.intent:
+                    filtered = unified_crawler.filter_by_intent(request.intent, all_urls)
+                    product_urls = set([item.url for item in filtered])
+                    print(f"\n✓ Unified Crawler: {len(product_urls)} relevant URLs found")
+                else:
+                    # No intent: use all discovered URLs
+                    product_urls = set([info.url for info in all_urls.values()])
+                    print(f"\n✓ Unified Crawler: {len(product_urls)} URLs discovered (no filtering)")
+                
+            except (ImportError, ValueError) as e:
+                print(f"⚠️  Unified crawler not available: {e}")
+                print("   Falling back to Web Crawler\n")
+                product_urls = None
+        
+        elif crawler == 'ai':
+            # Legacy AI crawler
+            try:
+                from src.crawlers.ai_crawler import AICrawler
+                
+                if not request.intent:
+                    raise ValueError("AI crawler requires user intent")
+                
+                jobs[job_id]["progress"] = {
+                    "stage": "ai_crawling",
+                    "message": "[AI Crawler] Discovering and classifying pages with Gemini"
+                }
+                
+                jina_key = os.getenv('JINA_API_KEY')
+                gemini_key = os.getenv('GEMINI_API_KEY') or os.getenv('GEMINAI_API_KEY')
+                
+                if not jina_key or not gemini_key:
+                    raise ValueError("JINA_API_KEY and GEMINI_API_KEY required")
+                
+                ai_crawler = AICrawler(jina_key, gemini_key, use_cache=config.use_cache)
+                product_urls = ai_crawler.crawl(config.base_url, request.intent, config.max_pages)
+                print(f"✓ AI Crawler found {len(product_urls)} product URLs")
+                
+            except (ImportError, ValueError) as e:
+                print(f"⚠️ AI crawler failed: {e}, falling back to web crawler")
+                product_urls = None
+        
+        # Step 2: Initialize Scraper
+        is_async = scraper in ['lam', 'ai']
+        
+        if scraper == 'lam':
+            try:
+                from src.core.lam_scraper import LAMScraper
+                scraper_instance = LAMScraper(config, strictness=request.strictness, enable_gemini=True, force_ai=request.force_ai)
+                
+                force_ai_msg = " (Force AI Mode)" if request.force_ai else ""
+                jobs[job_id]["progress"] = {
+                    "stage": "extracting",
+                    "message": f"[LAM] Extracting with Gemini + Playwright{force_ai_msg}"
                 }
             except ImportError as e:
-                print(f"⚠️ LAM model not available: {e}")
-                print("   Falling back to Model S (static)")
-                scraper = BalancedScraper(config, strictness=request.strictness)
-                model_used = "S"
+                print(f"⚠️ LAM scraper not available: {e}, falling back to static")
+                from src.core.balanced_scraper import BalancedScraper
+                scraper_instance = BalancedScraper(config, strictness=request.strictness)
+                is_async = False
                 jobs[job_id]["progress"] = {
-                    "stage": "crawling",
-                    "message": f"LAM unavailable, using static model (strictness: {request.strictness})",
-                    "model": "S"
+                    "stage": "extracting",
+                    "message": f"LAM unavailable, using static scraper"
                 }
-        else:
-            # Use static scraper (Model S)
-            scraper = BalancedScraper(config, strictness=request.strictness)
-            model_used = "S"
+        
+        elif scraper == 'ai':
+            try:
+                from src.core.ai_scraper import AIScraper
+                scraper_instance = AIScraper(config, user_intent=request.intent or "Extract products with details")
+                jobs[job_id]["progress"] = {
+                    "stage": "extracting",
+                    "message": "[AI Scraper] Extracting with AI-powered methods"
+                }
+            except ImportError as e:
+                print(f"⚠️ AI scraper not available: {e}, falling back to static")
+                from src.core.balanced_scraper import BalancedScraper
+                scraper_instance = BalancedScraper(config, strictness=request.strictness)
+                is_async = False
+                jobs[job_id]["progress"] = {
+                    "stage": "extracting",
+                    "message": f"AI scraper unavailable, using static scraper"
+                }
+        
+        else:  # static
+            from src.core.balanced_scraper import BalancedScraper
+            scraper_instance = BalancedScraper(config, strictness=request.strictness)
             jobs[job_id]["progress"] = {
                 "stage": "crawling",
-                "message": f"Discovering pages (strictness: {request.strictness})",
-                "model": "S"
+                "message": f"Discovering pages (strictness: {request.strictness})"
             }
         
-        # Scrape with selected model
-        # LAM scraper's scrape_all_products is async, BalancedScraper's is sync
-        if model_used == "LAM":
-            catalog = await scraper.scrape_all_products()
+        # Step 3: Scrape with selected scraper
+        if is_async:
+            catalog = await scraper_instance.scrape_all_products(product_urls)
         else:
-            catalog = scraper.scrape_all_products()
+            catalog = scraper_instance.scrape_all_products(product_urls)
 
         # Handle both catalog formats
         if isinstance(catalog, dict) and 'products' in catalog:
@@ -227,7 +364,7 @@ async def run_scraper_job_async(job_id: str, request: ScrapeRequest):
         
         if total_products == 0:
             raise RuntimeError(
-                f"No products found with {request.strictness} strictness using Model {model_used}. "
+                f"No products found with {request.strictness} strictness using {crawler} crawler + {scraper} scraper. "
                 f"Try 'lenient' mode for higher recall."
             )
 
@@ -237,7 +374,7 @@ async def run_scraper_job_async(job_id: str, request: ScrapeRequest):
         }
 
         # Save catalog in requested formats
-        scraper.save_catalog(catalog, export_formats=request.export_formats)
+        scraper_instance.save_catalog(catalog, export_formats=request.export_formats)
 
         # Prepare file paths
         files = {"json": f"{RESULTS_DIR}/{job_id}.json"}
@@ -251,7 +388,8 @@ async def run_scraper_job_async(job_id: str, request: ScrapeRequest):
         result_data = {
             "total_products": total_products,
             "strictness": request.strictness,
-            "model_used": model_used,
+            "crawler": crawler,
+            "scraper": scraper,
             "files": files,
         }
         
@@ -324,18 +462,19 @@ async def run_scraper_job_async(job_id: str, request: ScrapeRequest):
 
         # Update job as completed
         jobs[job_id]["status"] = "completed"
-        jobs[job_id]["message"] = f"Scraping completed successfully using Model {model_used}"
+        jobs[job_id]["message"] = f"Scraping completed successfully using {crawler} crawler + {scraper} scraper"
         jobs[job_id]["result"] = result_data
         jobs[job_id]["completed_at"] = datetime.now().isoformat()
         
         completion_msg = f"Found {total_products} products"
-        if model_used == "LAM" and isinstance(catalog, dict) and 'configurators_detected' in catalog:
+        if scraper == "lam" and isinstance(catalog, dict) and 'configurators_detected' in catalog:
             completion_msg += f" ({catalog['configurators_detected']} with configurators)"
         
         jobs[job_id]["progress"] = {
             "stage": "completed",
             "message": completion_msg,
-            "model": model_used
+            "crawler": crawler,
+            "scraper": scraper
         }
 
     except Exception as e:
@@ -429,6 +568,55 @@ def get_features():
         pass
     
     return {
+        "crawlers": {
+            "web": {
+                "available": True,
+                "description": "Traditional web crawler with rule-based classification",
+                "features": ["Fast", "Reliable", "No API costs"],
+                "use_case": "Standard e-commerce sites with clear product pages"
+            },
+            "ai": {
+                "available": gemini_available,
+                "description": "Legacy AI crawler using Jina + Gemini",
+                "features": ["Semantic classification", "Context-aware"],
+                "use_case": "Non-conventional sites (portfolios, case studies)",
+                "requirements": ["JINA_API_KEY", "GEMINI_API_KEY"]
+            },
+            "unified": {
+                "available": gemini_available,
+                "description": "Unified crawler: Discover all URLs + AI filtering (RECOMMENDED)",
+                "features": ["No Jina dependency", "Two-phase approach", "Best accuracy"],
+                "use_case": "All site types, especially non-standard layouts",
+                "requirements": ["GEMINI_API_KEY"],
+                "workflow": [
+                    "Phase 1: Discover all accessible URLs",
+                    "Phase 2: Gemini filters URLs by intent"
+                ]
+            }
+        },
+        "scrapers": {
+            "static": {
+                "available": True,
+                "description": "Fast HTML parsing with Jina AI",
+                "features": ["Fast", "No browser", "Works offline"]
+            },
+            "lam": {
+                "available": lam_available,
+                "gemini_configured": gemini_available,
+                "description": "Gemini + Playwright interactive extraction",
+                "features": ["Configurator detection", "Interactive extraction", "Higher accuracy"],
+                "workflow": [
+                    "Step 1: Identify product pages",
+                    "Step 2: Detect configurators with Gemini",
+                    "Step 3: Interactive extraction"
+                ]
+            },
+            "ai": {
+                "available": gemini_available,
+                "description": "AI-powered semantic extraction",
+                "features": ["Deep understanding", "Context-aware", "Flexible"]
+            }
+        },
         "models": {
             "S": {
                 "available": True,
