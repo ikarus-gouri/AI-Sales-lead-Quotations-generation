@@ -43,7 +43,7 @@ class BalancedScraper:
         strictness_level = strictness_map.get(strictness.lower(), StrictnessLevel.BALANCED)
         
         # Initialize components
-        self.http_client = HTTPClient(timeout=config.request_timeout, use_cache=config.use_cache)
+        self.http_client = HTTPClient(timeout=config.request_timeout)
         self.link_extractor = LinkExtractor()
         self.product_extractor = ProductExtractor()
         self.configurator_detector = ConfiguratorDetector()
@@ -58,7 +58,6 @@ class BalancedScraper:
         print(f"✓ Using BALANCED classifier (strictness: {strictness_level.value})")
         print(f"  Threshold: {self.classifier.PRODUCT_THRESHOLD}")
         print(f"  Content signals required: {self.classifier.CONTENT_SIGNAL_REQUIREMENT}")
-        print(f"  HTTP Cache: {'enabled' if config.use_cache else 'disabled'}")
         
         # Initialize crawler
         self.crawler = WebCrawler(

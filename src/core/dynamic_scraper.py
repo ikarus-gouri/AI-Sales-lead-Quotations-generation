@@ -97,7 +97,7 @@ class DynamicScraper:
         self.strictness_level = strictness_map.get(strictness.lower(), StrictnessLevel.BALANCED)
         
         # Initialize core components (same as BalancedScraper)
-        self.http_client = HTTPClient(timeout=config.request_timeout, use_cache=config.use_cache)
+        self.http_client = HTTPClient(timeout=config.request_timeout)
         self.link_extractor = LinkExtractor()
         self.product_extractor = ProductExtractor()
         self.configurator_detector = ConfiguratorDetector()

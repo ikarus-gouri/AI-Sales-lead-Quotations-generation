@@ -115,7 +115,7 @@ async def run_scraper_async():
             if not gemini_key:
                 raise ValueError("GEMINI_API_KEY required for unified crawler")
             
-            http_client = HTTPClient(use_cache=config.use_cache)
+            http_client = HTTPClient()
             link_extractor = LinkExtractor()
             unified_crawler = Crawler(
                 base_url=config.base_url,
@@ -153,7 +153,7 @@ async def run_scraper_async():
             if not jina_key or not gemini_key:
                 raise ValueError("JINA_API_KEY and GEMINI_API_KEY required for AI crawler")
             
-            ai_crawler = AICrawler(jina_key, gemini_key, use_cache=config.use_cache)
+            ai_crawler = AICrawler(jina_key, gemini_key)
             product_urls = ai_crawler.crawl(config.base_url, args.intent, config.max_pages)
             print(f"\n✓ AI Crawler discovered {len(product_urls)} product URLs")
         except (ImportError, ValueError) as e:
@@ -256,6 +256,6 @@ if __name__ == "__main__":
     
     # Fix for Windows: Set event loop policy for subprocess support (Playwright)
     if sys.platform == 'win32':
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
     
     asyncio.run(run_scraper_async())

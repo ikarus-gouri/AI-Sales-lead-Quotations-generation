@@ -40,9 +40,6 @@ class ScraperConfig:
     # Jina AI settings
     jina_api_url: str = "https://r.jina.ai/"
     
-    # Cache settings
-    use_cache: bool = True  # Enable/disable HTTP caching
-    
     # Intent-driven LAM settings
     user_intent: Optional[str] = None  # Natural language intent for LAM model
     max_variants_per_model: int = 50   # Max variants to explore per model (LAM guardrail)

@@ -111,7 +111,6 @@ class ScrapeRequest(BaseModel):
     
     headless: bool = Field(True, description="Deprecated parameter (no browser mode)")
     force_ai: bool = Field(False, description="Force Gemini AI extraction even for static sites (LAM scraper only)")
-    use_cache: bool = Field(True, description="Enable HTTP response caching (speeds up re-scraping)")
     intent: Optional[str] = Field(None, description="User intent for AI crawler or LAM/AI scraper")
     google_sheets_upload: bool = Field(False, description="Upload results to Google Sheets")
     google_sheets_id: Optional[str] = Field(None, description="Existing spreadsheet ID (uses env default if not provided)")
@@ -129,7 +128,6 @@ class ScrapeRequest(BaseModel):
                 "scraper": "lam",
                 "headless": False,
                 "force_ai": False,
-                "use_cache": True,
                 "intent": "Extract all products with customization options and prices",
                 "google_sheets_upload": False,
                 "google_sheets_id": None
@@ -208,7 +206,6 @@ async def run_scraper_job_async(job_id: str, request: ScrapeRequest):
             crawl_delay=request.crawl_delay,
             output_dir=RESULTS_DIR,
             output_filename=f"{job_id}.json",
-            use_cache=request.use_cache,
             user_intent=request.intent,
         )
         
@@ -221,7 +218,7 @@ async def run_scraper_job_async(job_id: str, request: ScrapeRequest):
                 from src.crawlers.crawler import Crawler
                 from src.utils.http_client import HTTPClient
                 from src.extractors.link_extractor import LinkExtractor
-                import os
+                # import os
                 
                 gemini_key = os.getenv('GEMINI_API_KEY') or os.getenv('GEMINAI_API_KEY')
                 if not gemini_key:
@@ -233,7 +230,7 @@ async def run_scraper_job_async(job_id: str, request: ScrapeRequest):
                     "crawler": "unified"
                 }
                 
-                http_client = HTTPClient(use_cache=config.use_cache)
+                http_client = HTTPClient()
                 link_extractor = LinkExtractor()
                 unified_crawler = Crawler(
                     base_url=config.base_url,
@@ -289,7 +286,7 @@ async def run_scraper_job_async(job_id: str, request: ScrapeRequest):
                 if not jina_key or not gemini_key:
                     raise ValueError("JINA_API_KEY and GEMINI_API_KEY required")
                 
-                ai_crawler = AICrawler(jina_key, gemini_key, use_cache=config.use_cache)
+                ai_crawler = AICrawler(jina_key, gemini_key)
                 product_urls = ai_crawler.crawl(config.base_url, request.intent, config.max_pages)
                 print(f"✓ AI Crawler found {len(product_urls)} product URLs")
                 
@@ -303,7 +300,17 @@ async def run_scraper_job_async(job_id: str, request: ScrapeRequest):
         if scraper == 'lam':
             try:
                 from src.core.lam_scraper import LAMScraper
-                scraper_instance = LAMScraper(config, strictness=request.strictness, enable_gemini=True, force_ai=request.force_ai)
+                # Force headless mode in Docker/HF environments
+                is_docker = os.path.exists('/.dockerenv') or os.getenv('SPACE_ID') is not None
+                headless_mode = True if is_docker else request.headless
+                
+                scraper_instance = LAMScraper(
+                    config, 
+                    strictness=request.strictness, 
+                    enable_gemini=True, 
+                    force_ai=request.force_ai,
+                    headless=headless_mode
+                )
                 
                 force_ai_msg = " (Force AI Mode)" if request.force_ai else ""
                 jobs[job_id]["progress"] = {
@@ -493,8 +500,14 @@ async def run_scraper_job_async(job_id: str, request: ScrapeRequest):
 def run_scraper_job(job_id: str, request: ScrapeRequest):
     """Wrapper to run async scraper job in background thread"""
     import asyncio
+    import os
+    import sys
     
     try:
+        # On Windows, use ProactorEventLoop for subprocess support in background threads
+        if sys.platform == 'win32':
+            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+        
         # Create new event loop for this thread
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)

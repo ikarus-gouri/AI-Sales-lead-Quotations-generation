@@ -83,8 +83,7 @@ class AIScraper:
         # Initialize AI crawler
         self.ai_crawler = AICrawler(
             jina_api_key=self.jina_api_key,
-            gemini_api_key=self.gemini_api_key,
-            use_cache=config.use_cache
+            gemini_api_key=self.gemini_api_key
         )
         
         # Initialize Gemini for extraction
@@ -208,7 +207,7 @@ class AIScraper:
         from ..utils.http_client import JinaClient
         
         # Fetch page content with Jina
-        jina_client = JinaClient(api_key=self.jina_api_key, use_cache=self.config.use_cache)
+        jina_client = JinaClient(api_key=self.jina_api_key)
         try:
             page = jina_client.fetch(url)
             markdown = page.text

@@ -1,5 +1,11 @@
 """Browser automation engine for dynamic configurators (Model-D)."""
 
+import sys
+
+# Fix for Windows: Set event loop policy for subprocess support (Playwright)
+if sys.platform == 'win32':
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
 import asyncio
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field

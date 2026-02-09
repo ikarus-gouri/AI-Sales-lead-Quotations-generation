@@ -162,7 +162,8 @@ class LAMScraper(BalancedScraper):
         strictness: str = "balanced",
         enable_gemini: bool = True,
         gemini_api_key: Optional[str] = None,
-        force_ai: bool = False
+        force_ai: bool = False,
+        headless: bool = True
     ):
         """
         Initialize LAM scraper.
@@ -173,6 +174,7 @@ class LAMScraper(BalancedScraper):
             enable_gemini: Enable Gemini interactive extraction
             gemini_api_key: Optional Gemini API key
             force_ai: Force Gemini AI extraction even for static sites
+            headless: Run Playwright in headless mode (default True for server environments)
         """
         # Initialize parent (BalancedScraper)
         super().__init__(config, strictness=strictness)
@@ -180,6 +182,7 @@ class LAMScraper(BalancedScraper):
         # Initialize Gemini components
         self.enable_gemini = enable_gemini
         self.force_ai = force_ai
+        self.headless = headless
         self.gemini_consultant = GeminiConfiguatorConsultant(gemini_api_key)
         self.gemini_extractor = None
         
@@ -187,8 +190,9 @@ class LAMScraper(BalancedScraper):
             try:
                 # Import from the correct location
                 from ..extractors.gemini_interactive_extractor import GeminiInteractiveExtractor
-                self.gemini_extractor = GeminiInteractiveExtractor(gemini_api_key)
-                print(f"  ✓ Gemini interactive extraction enabled")
+                self.gemini_extractor = GeminiInteractiveExtractor(gemini_api_key, headless=headless)
+                headless_msg = "headless" if headless else "headed"
+                print(f"  ✓ Gemini interactive extraction enabled ({headless_msg} mode)")
             except Exception as e:
                 print(f"  ⚠️ Gemini interactive extractor not available: {e}")
                 self.enable_gemini = False
@@ -478,10 +482,17 @@ Only return valid JSON.
         
         try:
             # Use Gemini interactive extractor (async)
+            target_url = (
+                configurator_info.get('configurator_url')
+                if configurator_info.get('configurator_url')
+                else url
+            )
+
             options = await self.gemini_extractor.interactive_extraction(
-                url,
+                target_url,
                 max_iterations=20
             )
+
             
             if options:
                 customizations = self._convert_gemini_options(options)

@@ -6,7 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 # ----------------------------
-# System deps required by Chromium
+# System deps required by Chromium + Xvfb (virtual display)
 # ----------------------------
 RUN apt-get update && apt-get install -y \
     wget \
@@ -30,6 +30,7 @@ RUN apt-get update && apt-get install -y \
     libxext6 \
     libx11-6 \
     fonts-liberation \
+    xvfb \
     --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
