@@ -21,7 +21,7 @@ async def run_scraper_async():
     parser.add_argument('--url', type=str, required=True, help='Target website URL')
     parser.add_argument('--model', type=str, default=None, choices=['S', 'D', 'LAM', 'AI'], help='[DEPRECATED] Use --crawler and --scraper instead')
     parser.add_argument('--crawler', type=str, default='web', choices=['web', 'ai', 'unified'], help='Crawler type: web (traditional), ai (AI-powered), unified (discover + filter)')
-    parser.add_argument('--scraper', type=str, default='static', choices=['static', 'lam', 'ai'], help='Scraper type: static (HTML), lam (Gemini+Playwright), ai (AI extraction)')
+    parser.add_argument('--scraper', type=str, default='static', choices=['static', 'lam', 'ai', 'auto'], help='Scraper type: static (HTML), lam (Gemini+Playwright), ai (AI extraction), auto (intelligent routing)')
     parser.add_argument('--strictness', type=str, default='balanced', choices=['lenient', 'balanced', 'strict'], help='Classification strictness level')
     parser.add_argument('--max-pages', type=int, default=50, help='Maximum pages to crawl')
     parser.add_argument('--max-depth', type=int, default=3, help='Maximum crawl depth')
@@ -58,15 +58,20 @@ async def run_scraper_async():
         if not export_formats:
             export_formats = ['json']  # Default to json if only google sheets was specified
     
-    # Validate intent requirement for AI/unified crawler
+    # Validate intent requirement for AI/unified crawler and auto scraper
     if args.crawler in ['ai', 'unified'] and not args.intent:
         print(f"⚠️  {args.crawler.upper()} crawler requires --intent parameter")
         print("   Example: --intent 'Extract custom projects with pricing info'\n")
         sys.exit(1)
     
+    if args.scraper == 'auto' and not args.intent:
+        print(f"⚠️  AUTO scraper requires --intent parameter for AI routing")
+        print("   Example: --intent 'Extract custom projects with pricing info'\n")
+        sys.exit(1)
+    
     # Display configuration
     crawler_names = {'web': 'Web Crawler (Traditional)', 'ai': 'AI Crawler (Gemini-powered)', 'unified': 'Unified Crawler (Discover + Filter)'}
-    scraper_names = {'static': 'Static (HTML parsing)', 'lam': 'LAM (Gemini+Playwright)', 'ai': 'AI (AI-powered extraction)'}
+    scraper_names = {'static': 'Static (HTML parsing)', 'lam': 'LAM (Gemini+Playwright)', 'ai': 'AI (AI-powered extraction)', 'auto': 'Auto (Intelligent Routing)'}
     
     print("\n" + "="*80)
     print(f"PRODUCT CATALOG SCRAPER")
@@ -162,9 +167,56 @@ async def run_scraper_async():
             product_urls = None  # Will use web crawler in scraper
     
     # Step 2: Initialize Scraper
-    is_async = args.scraper in ['lam', 'ai']
+    is_async = args.scraper in ['lam', 'ai', 'auto']
     
-    if args.scraper == 'lam':
+    if args.scraper == 'auto':
+        # Intelligent scraper selector
+        try:
+            from src.core.scraper_selector import ScraperSelector
+            
+            # Ensure we have product URLs
+            if product_urls is None:
+                # Use web crawler to discover URLs first
+                from src.crawlers.web_crawler import WebCrawler
+                from src.utils.http_client import HTTPClient
+                from src.extractors.link_extractor import LinkExtractor
+                from src.classifiers.balanced_classifier import BalancedClassifier, StrictnessLevel
+                
+                strictness_map = {
+                    "lenient": StrictnessLevel.LENIENT,
+                    "balanced": StrictnessLevel.BALANCED,
+                    "strict": StrictnessLevel.STRICT
+                }
+                strictness_level = strictness_map.get(args.strictness.lower(), StrictnessLevel.BALANCED)
+                
+                http_client = HTTPClient(timeout=config.request_timeout)
+                link_extractor = LinkExtractor()
+                classifier = BalancedClassifier(strictness=strictness_level)
+                
+                crawler = WebCrawler(
+                    base_url=config.base_url,
+                    http_client=http_client,
+                    link_extractor=link_extractor,
+                    classifier=classifier,
+                    crawl_delay=config.crawl_delay
+                )
+                
+                product_urls = crawler.crawl(
+                    max_pages=config.max_pages,
+                    max_depth=config.max_depth
+                )
+            
+            scraper = ScraperSelector(
+                config=config,
+                user_intent=args.intent
+            )
+        except ImportError as e:
+            print(f"⚠️  Auto scraper not available: {e}")
+            print("   Falling back to Static scraper\n")
+            scraper = BalancedScraper(config, strictness=args.strictness)
+            is_async = False
+    
+    elif args.scraper == 'lam':
         try:
             from src.core.lam_scraper import LAMScraper
             scraper = LAMScraper(config, strictness=args.strictness, enable_gemini=True, force_ai=args.forceai)
@@ -188,7 +240,10 @@ async def run_scraper_async():
         scraper = BalancedScraper(config, strictness=args.strictness)
     
     # Step 3: Scrape all products
-    if is_async:
+    if args.scraper == 'auto':
+        # Auto scraper uses analyze_and_scrape method
+        catalog = await scraper.analyze_and_scrape(product_urls)
+    elif is_async:
         catalog = await scraper.scrape_all_products(product_urls)
     else:
         catalog = scraper.scrape_all_products(product_urls)

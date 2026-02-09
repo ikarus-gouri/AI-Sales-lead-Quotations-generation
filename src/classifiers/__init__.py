@@ -4,7 +4,7 @@
 from .base_classifier import BaseClassifier
 from .rule_based import RuleBasedClassifier, ClassificationSignals, PageClassification
 from .balanced_classifier import BalancedClassifier, StrictnessLevel, ClassificationResult
-from .dynamic_classifier import DynamicPageClassifier, PageClassification as DynamicPageClassification, DynamicClassifier
+# from .dynamic_classifier import DynamicPageClassifier, PageClassification as DynamicPageClassification, DynamicClassifier
 
 __all__ = [
     'BaseClassifier',
@@ -14,7 +14,7 @@ __all__ = [
     'BalancedClassifier',
     'StrictnessLevel',
     'ClassificationResult',
-    'DynamicPageClassifier',
-    'DynamicPageClassification',
-    'DynamicClassifier',
+    # 'DynamicPageClassifier',
+    # 'DynamicPageClassification',
+    # 'DynamicClassifier',
 ]

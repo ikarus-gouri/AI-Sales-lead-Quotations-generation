@@ -163,18 +163,26 @@ class AIScraper:
             print(f"\n[{i}/{len(product_urls)}] Extracting: {url}")
             
             try:
-                # Extract product/offering data
-                product_data = await self._extract_page_data(url)
+                # Extract product/offering data (may return multiple items from one page)
+                products_list = await self._extract_page_data(url)
                 
-                if product_data:
-                    catalog[url] = product_data
+                if products_list:
+                    # Store all products from this URL
+                    for idx, product_data in enumerate(products_list):
+                        # Create unique key for each product (URL + index if multiple)
+                        if len(products_list) > 1:
+                            catalog_key = f"{url}#item-{idx+1}"
+                        else:
+                            catalog_key = url
+                        
+                        catalog[catalog_key] = product_data
+                        
+                        if product_data.get('page_type') == "PRODUCT":
+                            self.stats['products_extracted'] += 1
+                        elif product_data.get('page_type') == "OFFERING":
+                            self.stats['offerings_extracted'] += 1
                     
-                    if product_data.get('page_type') == "PRODUCT":
-                        self.stats['products_extracted'] += 1
-                    elif product_data.get('page_type') == "OFFERING":
-                        self.stats['offerings_extracted'] += 1
-                    
-                    print(f"  ✓ Extracted: {product_data['product_name']}")
+                    print(f"  ✓ Added {len(products_list)} item(s) to catalog")
                 else:
                     print(f"  ✗ Extraction failed")
                     self.stats['extraction_failures'] += 1
@@ -194,7 +202,7 @@ class AIScraper:
         
         return catalog
     
-    async def _extract_page_data(self, url: str) -> Optional[Dict]:
+    async def _extract_page_data(self, url: str) -> Optional[List[Dict]]:
         """
         Extract product/offering data from a URL using Gemini.
         
@@ -202,7 +210,7 @@ class AIScraper:
             url: Product page URL
             
         Returns:
-            Product data dictionary or None
+            List of product data dictionaries or None
         """
         from ..utils.http_client import JinaClient
         
@@ -236,32 +244,57 @@ PAGE CONTENT:
 {markdown[:8000]}
 
 TASK:
-Extract all relevant product/offering information.
+Extract ALL products/services/projects/offerings from this page.
 
-OUTPUT STRICT JSON:
+CRITICAL DISTINCTION:
+- If the page shows DIFFERENT PRODUCTS/MODELS (e.g., "Model A", "Model B", "Model C")
+  → Extract each as a SEPARATE item in the array
+  → Example: Different RV models, different floor plans, different product lines
+  
+- If the page shows ONE PRODUCT with CUSTOMIZATION OPTIONS (e.g., colors, sizes)
+  → Extract as ONE item with customizations in the "customizations" field
+  → Example: A product with color options, size variants, add-on features
 
-{{
-  "product_name": "Name of product or offering",
-  "page_type": "PRODUCT or OFFERING",
-  "base_price": "Price string or null",
-  "price_note": "Custom quote, Starting from, etc.",
-  "specifications": {{
-    "spec_name": "value"
-  }},
-  "customizations": {{
-    "category": ["option1", "option2"]
-  }},
-  "description": "Brief product description",
-  "features": ["feature1", "feature2"]
-}}
+CLUES FOR SEPARATE PRODUCTS:
+- Items have unique model names/numbers (e.g., "2026 King Aire", "2026 Essex")
+- Category text like "Select a model", "Choose your product", "Available models"
+- Each item is fundamentally different with its own features/specs
+- Selecting one means choosing a completely different product
+
+CLUES FOR CUSTOMIZATIONS (single product):
+- Options are variations of attributes (colors, sizes, finishes)
+- Category text like "Exterior colors", "Interior options", "Add-ons"
+- Options modify/enhance the same base product
+- Multiple can be selected together
+
+OUTPUT STRICT JSON (ARRAY):
+
+[
+  {{
+    "product_name": "Name of product or offering",
+    "page_type": "PRODUCT or OFFERING",
+    "base_price": "Price string or null",
+    "price_note": "Custom quote, Starting from, etc.",
+    "specifications": {{
+      "spec_name": "value"
+    }},
+    "customizations": {{
+      "category": ["option1", "option2"]
+    }},
+    "description": "Brief product description",
+    "features": ["feature1", "feature2"]
+  }}
+]
 
 RULES:
-- Extract actual data from the page
-- specifications: technical specs, dimensions, materials, etc.
-- customizations: color options, size options, add-ons, etc.
+- If multiple distinct products exist, create SEPARATE array items for each
+- If ONE product with options exists, create ONE array item with customizations
+- specifications: technical specs, dimensions, materials for THIS specific product
+- customizations: options that apply to THIS specific product only
 - If no price shown, set base_price to null and price_note to "Custom quote"
 - page_type should be PRODUCT for sellable items, OFFERING for projects/services
-- Return ONLY JSON, no explanations
+- Return ONLY JSON array, no explanations
+- Even if only one item, return it in an array
 """
 
         try:
@@ -275,41 +308,50 @@ RULES:
             
             extracted_data = json.loads(response.text)
             
-            # Handle case where Gemini returns a list instead of dict
-            if isinstance(extracted_data, list):
-                if not extracted_data:
-                    print(f"  ✗ Gemini returned empty list")
-                    return None
-                # Take first item if it's a list
-                extracted_data = extracted_data[0] if isinstance(extracted_data[0], dict) else {}
-            
-            # Ensure we have a dictionary
-            if not isinstance(extracted_data, dict):
+            # Ensure we have a list
+            if isinstance(extracted_data, dict):
+                # If it's a single dict, wrap it in a list
+                extracted_data = [extracted_data]
+            elif not isinstance(extracted_data, list):
                 print(f"  ✗ Gemini returned invalid format: {type(extracted_data)}")
                 return None
             
-            # Build final product data
-            product_data = {
-                "product_name": extracted_data.get("product_name", url.split("/")[-1]),
-                "url": url,
-                "page_type": extracted_data.get("page_type", "PRODUCT"),
-                "base_price": extracted_data.get("base_price"),
-                "price_note": extracted_data.get("price_note", ""),
-                "specifications": extracted_data.get("specifications", {}),
-                "customizations": extracted_data.get("customizations", {}),
-                "description": extracted_data.get("description", ""),
-                "features": extracted_data.get("features", []),
-                "total_customization_options": sum(
-                    len(opts) for opts in extracted_data.get("customizations", {}).values()
-                ),
-                
-                # AI metadata
-                "extraction_method": "ai_scraper_gemini",
-                "user_intent": self.user_intent
-            }
+            if not extracted_data:
+                print(f"  ✗ Gemini returned empty list")
+                return None
             
-            print(f"\033[92m  ✓ Extracted: {product_data['product_name']}\033[0m")
-            return product_data
+            # Build final product data for each extracted item
+            products_list = []
+            for item in extracted_data:
+                if not isinstance(item, dict):
+                    continue
+                    
+                product_data = {
+                    "product_name": item.get("product_name", url.split("/")[-1]),
+                    "url": url,
+                    "page_type": item.get("page_type", "PRODUCT"),
+                    "base_price": item.get("base_price"),
+                    "price_note": item.get("price_note", ""),
+                    "specifications": item.get("specifications", {}),
+                    "customizations": item.get("customizations", {}),
+                    "description": item.get("description", ""),
+                    "features": item.get("features", []),
+                    "total_customization_options": sum(
+                        len(opts) for opts in item.get("customizations", {}).values()
+                    ),
+                    
+                    # AI metadata
+                    "extraction_method": "ai_scraper_gemini",
+                    "user_intent": self.user_intent
+                }
+                products_list.append(product_data)
+            
+            if products_list:
+                print(f"\033[92m  ✓ Extracted {len(products_list)} item(s) from page\033[0m")
+                return products_list
+            else:
+                print(f"  ✗ No valid items extracted")
+                return None
             
         except json.JSONDecodeError as e:
             print(f"  ✗ JSON parsing failed: {e}")

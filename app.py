@@ -104,7 +104,7 @@ class ScrapeRequest(BaseModel):
     
     # New decoupled parameters
     crawler: Optional[str] = Field(None, pattern="^(web|ai|unified)?$", description="Crawler type: web (traditional), ai (Gemini-powered), or unified (discover + filter)")
-    scraper: Optional[str] = Field(None, pattern="^(static|lam|ai)?$", description="Scraper type: static (HTML), lam (Gemini+Playwright), or ai (AI extraction)")
+    scraper: Optional[str] = Field(None, pattern="^(static|lam|ai|auto)?$", description="Scraper type: static (HTML), lam (Gemini+Playwright), ai (AI extraction), or auto (intelligent routing)")
     
     # Legacy parameter (backward compatibility)
     model: Optional[str] = Field(None, pattern="^(S|LAM|AI)?$", description="[DEPRECATED] Use crawler + scraper instead")
@@ -295,9 +295,69 @@ async def run_scraper_job_async(job_id: str, request: ScrapeRequest):
                 product_urls = None
         
         # Step 2: Initialize Scraper
-        is_async = scraper in ['lam', 'ai']
+        is_async = scraper in ['lam', 'ai', 'auto']
         
-        if scraper == 'lam':
+        if scraper == 'auto':
+            try:
+                from src.core.scraper_selector import ScraperSelector
+                
+                # Ensure we have product URLs
+                if product_urls is None:
+                    # Use web crawler to discover URLs first
+                    from src.crawlers.web_crawler import WebCrawler
+                    from src.utils.http_client import HTTPClient
+                    from src.extractors.link_extractor import LinkExtractor
+                    from src.classifiers.balanced_classifier import BalancedClassifier, StrictnessLevel
+                    
+                    strictness_map = {
+                        "lenient": StrictnessLevel.LENIENT,
+                        "balanced": StrictnessLevel.BALANCED,
+                        "strict": StrictnessLevel.STRICT
+                    }
+                    strictness_level = strictness_map.get(request.strictness.lower(), StrictnessLevel.BALANCED)
+                    
+                    http_client = HTTPClient(timeout=30)
+                    link_extractor = LinkExtractor()
+                    classifier = BalancedClassifier(strictness=strictness_level)
+                    
+                    web_crawler = WebCrawler(
+                        base_url=str(config.base_url),
+                        http_client=http_client,
+                        link_extractor=link_extractor,
+                        classifier=classifier,
+                        crawl_delay=config.crawl_delay
+                    )
+                    
+                    product_urls = web_crawler.crawl(
+                        max_pages=config.max_pages,
+                        max_depth=config.max_depth
+                    )
+                    
+                    jobs[job_id]["progress"] = {
+                        "stage": "routing",
+                        "message": f"Discovered {len(product_urls)} URLs, analyzing for routing..."
+                    }
+                
+                scraper_instance = ScraperSelector(
+                    config=config,
+                    user_intent=request.intent or "Extract products with details"
+                )
+                
+                jobs[job_id]["progress"] = {
+                    "stage": "routing",
+                    "message": "[Auto] Analyzing URLs for intelligent routing"
+                }
+            except ImportError as e:
+                print(f"⚠️ Auto scraper not available: {e}, falling back to static")
+                from src.core.balanced_scraper import BalancedScraper
+                scraper_instance = BalancedScraper(config, strictness=request.strictness)
+                is_async = False
+                jobs[job_id]["progress"] = {
+                    "stage": "extracting",
+                    "message": f"Auto scraper unavailable, using static scraper"
+                }
+        
+        elif scraper == 'lam':
             try:
                 from src.core.lam_scraper import LAMScraper
                 # Force headless mode in Docker/HF environments
@@ -354,7 +414,10 @@ async def run_scraper_job_async(job_id: str, request: ScrapeRequest):
             }
         
         # Step 3: Scrape with selected scraper
-        if is_async:
+        if scraper == 'auto':
+            # Auto scraper uses analyze_and_scrape method
+            catalog = await scraper_instance.analyze_and_scrape(product_urls)
+        elif is_async:
             catalog = await scraper_instance.scrape_all_products(product_urls)
         else:
             catalog = scraper_instance.scrape_all_products(product_urls)
@@ -628,6 +691,18 @@ def get_features():
                 "available": gemini_available,
                 "description": "AI-powered semantic extraction",
                 "features": ["Deep understanding", "Context-aware", "Flexible"]
+            },
+            "auto": {
+                "available": gemini_available,
+                "description": "Intelligent routing system (RECOMMENDED)",
+                "features": ["Analyzes each URL", "Routes to optimal scraper", "Best overall results"],
+                "workflow": [
+                    "Step 1: Batch analyze URLs with Gemini",
+                    "Step 2: Route to LAM/Static/AI based on content type",
+                    "Step 3: Aggregate results from all scrapers"
+                ],
+                "use_case": "Mixed content types (configurators + standard products + services)",
+                "requirements": ["GEMINI_API_KEY"]
             }
         },
         "models": {

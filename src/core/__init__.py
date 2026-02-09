@@ -3,11 +3,11 @@
 
 from .config import ScraperConfig
 from .balanced_scraper import BalancedScraper
-from .dynamic_scraper import DynamicScraper
+from .lam_scraper import LAMScraper
 
 __all__ = [
     'ScraperConfig',
     'BalancedScraper',
-    'DynamicScraper',
+    'LAMScraper'
 ]
 

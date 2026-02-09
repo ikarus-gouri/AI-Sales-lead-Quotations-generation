@@ -94,24 +94,13 @@ class BalancedScraper:
         if not markdown:
             return None
         
-        # Re-verify it's a product page (optional double-check)
-        classification = self.classifier.classify(url, markdown)
-        
-        if not classification.is_product:
-            print(f"  ⚠️  Page reclassified as {classification.page_type}")
-            print(f"     Confidence: {classification.confidence:.0%}")
-            print(f"     Reasons: {', '.join(classification.reasons[:2])}")
-            return None
+        # NOTE: Classification already done by crawler - trust the crawler's judgment
+        # No need to re-classify here as each crawler (AI, Web, etc.) uses its own method
         
         # Detect configurator dynamically
         configurator_info = self.configurator_detector.has_configurator(url, markdown)
         
-        # Log detection results
-        print(f"  📋 Classification:")
-        print(f"     Type: {classification.page_type.upper()}")
-        print(f"     Confidence: {classification.confidence:.0%}")
-        print(f"     Score: {classification.scores.get('total', 0):.1f}")
-        
+        # Log configurator detection
         print(f"  🔧 Configurator:")
         print(f"     Detected: {configurator_info['has_configurator']}")
         if configurator_info['has_configurator']:
@@ -186,11 +175,6 @@ class BalancedScraper:
             "url": url,
             "base_price": base_price,
             "specifications": specifications,
-            
-            # Classification metadata
-            "classification_confidence": classification.confidence,
-            "classification_score": classification.scores.get('total', 0),
-            "page_type": classification.page_type,
             
             # Configurator metadata
             "has_configurator": configurator_info['has_configurator'],

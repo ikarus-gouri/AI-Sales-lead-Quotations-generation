@@ -33,7 +33,6 @@ class HTTPClient:
     
     # Class-level state for all instances
     _jina_semaphore = threading.Semaphore(4)  # Max 4 concurrent
-    _jina_cache: Dict[str, Optional[str]] = {}  # URL -> content
     _jina_429_count = 0
     _jina_lock = threading.Lock()  # Protect shared counters
     _last_429_reset = time.time()
@@ -50,40 +49,9 @@ class HTTPClient:
         '/sitemap', '/robots.txt'
     ]
     
-    def __init__(self, timeout: int = 15, use_cache: bool = True):
+    def __init__(self, timeout: int = 15):
         self.timeout = timeout
         self.jina_base_url = "https://r.jina.ai/"
-        self.use_cache = use_cache
-    
-    def _normalize_jina_url(self, url: str) -> str:
-        """
-        Normalize URL for caching.
-        
-        Removes:
-        - URL fragment (#section)
-        - Trailing slash
-        
-        Lowercases domain for consistency.
-        """
-        parsed = urlparse(url)
-        
-        # Lowercase domain
-        netloc = parsed.netloc.lower()
-        
-        # Remove trailing slash from path
-        path = parsed.path.rstrip('/')
-        
-        # Reconstruct without fragment
-        normalized = urlunparse((
-            parsed.scheme,
-            netloc,
-            path,
-            parsed.params,
-            parsed.query,
-            ''  # No fragment
-        ))
-        
-        return normalized
     
     def _should_skip_jina_url(self, url: str) -> bool:
         """Check if URL is on blocklist (non-content page)."""
@@ -175,7 +143,7 @@ class HTTPClient:
     
     def scrape_with_jina(self, url: str) -> Optional[str]:
         """
-        Scrape a URL using Jina AI Reader with rate limiting and caching.
+        Scrape a URL using Jina AI Reader with rate limiting.
         
         Args:
             url: The URL to scrape
@@ -183,27 +151,13 @@ class HTTPClient:
         Returns:
             Markdown content or None if failed
         """
-        # Normalize URL
-        normalized_url = self._normalize_jina_url(url)
-        
-        # Check cache first (never hit same URL twice) - if caching enabled
-        if self.use_cache and normalized_url in HTTPClient._jina_cache:
-            print(f"  💾 Cache hit: {url}")
-            return HTTPClient._jina_cache[normalized_url]
-        
         # Check blocklist
         if self._should_skip_jina_url(url):
             print(f"  ⏭️  Skipping non-content page: {url}")
-            if self.use_cache:
-                HTTPClient._jina_cache[normalized_url] = None
             return None
         
         # Make rate-limited call
         result = self._jina_call_with_limit(url)
-        
-        # Cache result (even if None - fail fast and move on) - if caching enabled
-        if self.use_cache:
-            HTTPClient._jina_cache[normalized_url] = result
         
         return result
     
@@ -235,16 +189,15 @@ class JinaClient:
     Used by AI crawler for semantic page classification.
     """
     
-    def __init__(self, api_key: str = None, use_cache: bool = True):
+    def __init__(self, api_key: str = None):
         """
         Initialize Jina client.
         
         Args:
             api_key: Jina API key (currently not required for r.jina.ai)
-            use_cache: Enable HTTP response caching
         """
         self.api_key = api_key
-        self.http_client = HTTPClient(use_cache=use_cache)
+        self.http_client = HTTPClient()
     
     def fetch(self, url: str) -> JinaResponse:
         """

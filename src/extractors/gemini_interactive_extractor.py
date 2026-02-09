@@ -39,15 +39,11 @@ class GeminiInteractiveExtractor:
         # Store headless preference
         self.headless = headless
         
-        # Store discovered options
-        self.discovered_options = []
-        self.visited_states = set()
-        self.max_depth = 10
-        
         # Pattern detection for optimization
         self.detected_pattern = None
-        self.pattern_confidence = 0
-        self.actions_history = []
+        
+        # Track model selection page for multi-model configurators
+        self.model_selection_page_url = None
         
     async def capture_page_state(self, page) -> Dict:
         """Capture current page state with screenshot and elements"""
@@ -168,16 +164,27 @@ Available Interactive Elements (with positions and states):
 
 TASK: Analyze the page and tell me:
 1. What NEW options are visible on the current page that we haven't captured yet?
-2. For EACH option found, look through the 'Available Interactive Elements' list above and find matching elements
-3. Extract the 'image' field value from matching elements - this contains the image URL for that option
-4. Are there any ENABLED (not disabled) option buttons/cards that need to be selected?
-5. What should I click next to reveal MORE customization options?
+2. Are there any ENABLED (not disabled) option buttons/cards that need to be selected?
+3. What should I click next to reveal MORE customization options?
 
-IMPORTANT RULES FOR IMAGE EXTRACTION:
-- Look at the 'Available Interactive Elements' JSON data above
-- Each element has an 'image' field - extract this URL for each option you find
-- Match option text to element 'text' field to find the corresponding image URL
-- If an element has a non-empty 'image' field, include it in the new_options_visible
+CRITICAL: DISTINGUISH BETWEEN PRODUCTS vs CUSTOMIZATIONS:
+- **PRODUCTS/MODELS**: Different items like "2026 King Aire", "2026 Essex" - these are SEPARATE products
+  → Category: Use descriptive names like "Model Selection", "Available Products", "Choose Model"
+  → Each model should be extracted as a separate option under this category
+  
+- **CUSTOMIZATIONS**: Options for the SAME product like "Red", "Blue", "Leather Seats", "Sunroof"
+  → Category: Use specific names like "Exterior Color", "Interior Fabric", "Optional Features"
+  → These are variations/add-ons for one product
+
+CLUES FOR PRODUCTS (extract each model separately):
+- Items are named products/models (e.g., "King Aire KG26", "Essex EX26")
+- Categories like "Select a coach", "Choose your model", "Available models"
+- Each item represents a fundamentally different product
+
+CLUES FOR CUSTOMIZATIONS (extract as options for the current product):
+- Items are variations: colors, sizes, finishes, features
+- Categories like "Exterior Paint", "Floor Plan", "Interior", "Add-ons"
+- Multiple can be selected together to customize one product
 
 IMPORTANT RULES FOR CLICKING:
 - NEVER click disabled buttons (disabled: true)
@@ -186,7 +193,6 @@ IMPORTANT RULES FOR CLICKING:
 - THEN once selections are made, disabled buttons may become enabled
 - Check the 'disabled' field - if true, DO NOT recommend clicking it
 - Only recommend clicking ENABLED elements (disabled: false)
-- Extract image URLs from the 'image' field in element data and include them in new_options_visible
 
 CONDITIONAL/DEPENDENT OPTIONS:
 - Some configurators reveal new options ONLY after selecting a previous option
@@ -201,11 +207,10 @@ Return JSON with this structure:
 {{
   "new_options_visible": [
     {{
-      "category": "string - category name (e.g., Model, Floor Plan, Exterior Paint)",
-      "component": "string - option name (e.g., 2026 KING AIRE, 4521, ANTRIM)",
+      "category": "string - IMPORTANT: Use 'Model Selection' or similar for product choices, specific names for customizations",
+      "component": "string - option name (e.g., 2026 KING AIRE, ANTRIM color, Leather seats)",
       "price": "string - price if visible, else N/A",
-      "reference": "string - any additional reference info",
-      "image": "string - REQUIRED: Extract from 'image' field in matching element, empty string if not found"
+      "reference": "string - any additional reference info"
     }}
   ],
   "actions_sequence": [
@@ -241,6 +246,7 @@ Return JSON with this structure:
 
 IMPORTANT:
 - NEVER recommend clicking disabled elements (disabled: true)
+- For model/product selection pages, use category names that indicate these are different products
 - You can recommend MULTIPLE actions in sequence (e.g., select option THEN click next)
 - OR you can recommend SINGLE action (just select) if it will reveal new content dynamically
 - Look for patterns: if this is a multi-step form, describe the workflow pattern
@@ -253,6 +259,7 @@ IMPORTANT:
 - **CRITICAL**: Detect final/last step with text like FINISH, COMPLETE, SUMMARY, REVIEW ORDER
 - **CRITICAL**: If at final step AND this is a multi-model configurator, set should_return_to_models=true
 - **CRITICAL**: Describe how to return to first tab/model selection (click tab, back button, navigate URL)
+- **NOTE**: Images are extracted automatically by Playwright, don't include in response
 
 Only return valid JSON.
 """
@@ -280,6 +287,35 @@ Only return valid JSON.
                 'workflow_pattern': {'detected': False},
                 'exploration_complete': True
             }
+    
+    def match_options_with_images(self, options: List[Dict], elements: List[Dict]) -> List[Dict]:
+        """Match extracted options with their images from Playwright element data"""
+        enriched_options = []
+        
+        for option in options:
+            component_text = option.get('component', '').lower()
+            
+            # Find matching element by text similarity
+            best_match = None
+            best_score = 0
+            
+            for element in elements:
+                element_text = element.get('text', '').lower()
+                
+                # Simple text matching - check if option name is in element text
+                if component_text and element_text:
+                    if component_text in element_text or element_text in component_text:
+                        # Calculate match score (higher is better)
+                        score = len(component_text) / (len(element_text) + 1)
+                        if score > best_score and element.get('image'):
+                            best_score = score
+                            best_match = element
+            
+            # Add image URL if found
+            option['image'] = best_match.get('image', '') if best_match else ''
+            enriched_options.append(option)
+        
+        return enriched_options
     
     async def find_and_click_element(self, page, recommendation: Dict) -> bool:
         """Find and click the element recommended by Gemini"""
@@ -492,6 +528,9 @@ Only return valid JSON.
                 await page.goto(url, wait_until='domcontentloaded', timeout=60000)
                 await page.wait_for_timeout(3000)
                 
+                # Store initial URL as model selection page for multi-model configurators
+                self.model_selection_page_url = url
+                
                 # Iterative exploration
                 for iteration in range(max_iterations):
                     print(f"\n{'─'*80}")
@@ -575,12 +614,16 @@ Only return valid JSON.
                     print("→ Consulting Gemini for guidance...")
                     guidance = self.ask_gemini_what_to_click(page_state, all_options)
                     
-                    # Extract newly visible options
+                    # Extract newly visible options and enrich with images from Playwright
                     new_options = guidance.get('new_options_visible', [])
                     if new_options:
+                        # Match options with images from Playwright element data
+                        new_options = self.match_options_with_images(new_options, page_state.get('elements', []))
+                        
                         print(f"✓ Found {len(new_options)} new options:")
                         for opt in new_options:
-                            print(f"  • {opt.get('category')} → {opt.get('component')}")
+                            img_status = "🖼️" if opt.get('image') else "  "
+                            print(f"  {img_status} {opt.get('category')} → {opt.get('component')}")
                         all_options.extend(new_options)
                         
                         # If we found new options, the page definitely changed - reset counter

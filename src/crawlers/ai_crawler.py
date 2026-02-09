@@ -54,12 +54,10 @@ class AICrawler:
         self,
         jina_api_key: str = None,
         gemini_api_key: str = None,
-        model_name: str = "gemini-2.5-flash",
-        use_cache: bool = True
+        model_name: str = "gemini-2.5-flash"
     ):
         # Jina API key is optional (r.jina.ai is free to use)
-        self.jina = JinaClient(api_key=jina_api_key, use_cache=use_cache)
-        self.use_cache = use_cache
+        self.jina = JinaClient(api_key=jina_api_key)
 
         genai.configure(api_key=gemini_api_key)
         self.model = genai.GenerativeModel(model_name)

@@ -598,11 +598,13 @@ Only return valid JSON.
                 'confidence': 0.0
             })
             
-            # Scrape the product with LAM method (now async)
-            product_data = await self._scrape_product_with_config_info(url, config_info)
+            # Scrape the product with LAM method (now async, returns list)
+            products_from_page = await self._scrape_product_with_config_info(url, config_info)
             
-            if product_data:
-                products.append(product_data)
+            if products_from_page:
+                products.extend(products_from_page)
+                if len(products_from_page) > 1:
+                    print(f"  ✓ Added {len(products_from_page)} products from this page")
             
             # Respect crawl delay
             if i < len(product_urls):
@@ -625,8 +627,12 @@ Only return valid JSON.
         
         return catalog
     
-    async def _scrape_product_with_config_info(self, url: str, config_info: Dict) -> Optional[Dict]:
-        """Scrape a product with pre-detected configurator information."""
+    async def _scrape_product_with_config_info(self, url: str, config_info: Dict) -> Optional[List[Dict]]:
+        """Scrape a product with pre-detected configurator information.
+        
+        Returns:
+            List of product dictionaries (multiple if page contains multiple products)
+        """
         # Get page content
         markdown = self.http_client.scrape_with_jina(url)
         if not markdown:
@@ -675,21 +681,310 @@ Only return valid JSON.
             customizations = self.product_extractor.extract_customizations(markdown)
             extraction_method = 'product_page'
         
-        return {
-            'product_name': product_name,
-            'url': url,
-            'base_price': base_price,
-            'specifications': specifications,
-            'extraction_method': extraction_method,
-            'model': 'LAM',
-            'has_configurator': config_info.get('has_configurator'),
-            'configurator_type': config_info.get('configurator_type'),
-            'requires_interaction': config_info.get('requires_interaction'),
-            'detection_method': config_info.get('detection_method'),
-            'customizations': customizations,
-            'customization_categories': list(customizations.keys()),
-            'total_customization_options': sum(len(opts) for opts in customizations.values())
-        }
+        # Check if customizations are actually multiple distinct products
+        products_list = self._split_multiple_products(
+            url=url,
+            product_name=product_name,
+            base_price=base_price,
+            specifications=specifications,
+            customizations=customizations,
+            extraction_method=extraction_method,
+            config_info=config_info
+        )
+        
+        if len(products_list) > 1:
+            print(f"  ✓ Split into {len(products_list)} separate products")
+        
+        return products_list
+    
+    def _split_multiple_products(
+        self, 
+        url: str,
+        product_name: str,
+        base_price: str,
+        specifications: Dict,
+        customizations: Dict,
+        extraction_method: str,
+        config_info: Dict
+    ) -> List[Dict]:
+        """Use Gemini to intelligently determine if customizations are separate products.
+        
+        Distinguishes between:
+        - Different products/models (each gets its own entry)
+        - Actual customizations (options for the SAME product)
+        
+        Returns:
+            List of product dictionaries
+        """
+        if not customizations or not self.gemini_consultant.enabled:
+            # No customizations or Gemini not available - return single product
+            return [{
+                'product_name': product_name,
+                'url': url,
+                'base_price': base_price,
+                'specifications': specifications,
+                'extraction_method': extraction_method,
+                'model': 'LAM',
+                'has_configurator': config_info.get('has_configurator'),
+                'configurator_type': config_info.get('configurator_type'),
+                'requires_interaction': config_info.get('requires_interaction'),
+                'detection_method': config_info.get('detection_method'),
+                'customizations': customizations,
+                'customization_categories': list(customizations.keys()),
+                'total_customization_options': sum(len(opts) for opts in customizations.values())
+            }]
+        
+        # Ask Gemini to analyze if these are separate products or customizations
+        try:
+            import json
+            
+            prompt = f"""
+Analyze these extracted options to determine if they are SEPARATE PRODUCTS or CUSTOMIZATIONS of the same product.
+
+Original Product/Page: {product_name}
+URL: {url}
+
+Extracted Options by Category:
+{json.dumps(customizations, indent=2)}
+
+TASK: For each category, determine if the items are:
+1. SEPARATE_PRODUCTS: Different products/models that should each get their own entry
+   - Example: Different RV models, different floor plans, different product lines
+   - Each item is a complete standalone product
+   - Selecting one means you're choosing a different product entirely
+
+2. CUSTOMIZATIONS: Options/variants for the SAME product
+   - Example: Paint colors, interior fabrics, add-on features
+   - These are modifications to the same base product
+   - You can have multiple customizations together
+
+CLUES FOR SEPARATE PRODUCTS:
+- Category names like: "Select a model", "Choose your coach", "Available models"
+- Items have distinctive names (e.g., "2026 King Aire", "2026 Essex", "2026 London Aire")
+- Items often have images and may have prices
+- Items are fundamentally different products
+
+CLUES FOR CUSTOMIZATIONS:
+- Category names like: "Exterior colors", "Interior fabric", "Optional features"
+- Items are variations of the same thing (e.g., "Red", "Blue", "Green")
+- Items modify/enhance the base product
+- Multiple can be selected together
+
+Return JSON:
+{{
+  "categories_analysis": [
+    {{
+      "category_name": "string",
+      "classification": "SEPARATE_PRODUCTS" | "CUSTOMIZATIONS",
+      "confidence": 0.0-1.0,
+      "reasoning": "why you classified it this way",
+      "sample_items": ["first 3 item names"]
+    }}
+  ],
+  "recommended_split": {{
+    "should_split": boolean,
+    "split_category": "category name to split on" or null,
+    "reasoning": "explain why or why not"
+  }}
+}}
+
+Only return valid JSON.
+"""
+            
+            response = self.gemini_consultant.model.generate_content(
+                prompt,
+                generation_config={
+                    "temperature": 0.1,
+                    "response_mime_type": "application/json"
+                }
+            )
+            
+            analysis = json.loads(response.text)
+            
+            # Check if we should split
+            should_split = analysis.get('recommended_split', {}).get('should_split', False)
+            split_category = analysis.get('recommended_split', {}).get('split_category')
+            
+            if not should_split or not split_category:
+                print(f"  ℹ️  Gemini: No product splitting needed - these are customizations")
+                # Return as single product
+                return [{
+                    'product_name': product_name,
+                    'url': url,
+                    'base_price': base_price,
+                    'specifications': specifications,
+                    'extraction_method': extraction_method,
+                    'model': 'LAM',
+                    'has_configurator': config_info.get('has_configurator'),
+                    'configurator_type': config_info.get('configurator_type'),
+                    'requires_interaction': config_info.get('requires_interaction'),
+                    'detection_method': config_info.get('detection_method'),
+                    'customizations': customizations,
+                    'customization_categories': list(customizations.keys()),
+                    'total_customization_options': sum(len(opts) for opts in customizations.values())
+                }]
+            
+            # Split into multiple products
+            print(f"  🤖 Gemini: Detected separate products in category '{split_category}'")
+            print(f"     Reason: {analysis.get('recommended_split', {}).get('reasoning', 'N/A')}")
+            
+            products_list = []
+            product_items = customizations.get(split_category, [])
+            
+            # Remove the products category from remaining customizations
+            remaining_customizations = {k: v for k, v in customizations.items() if k != split_category}
+            
+            for idx, item in enumerate(product_items):
+                if isinstance(item, dict):
+                    item_name = item.get('label', f'{product_name} - Item {idx+1}')
+                    item_price = item.get('price')
+                    item_image = item.get('image')
+                else:
+                    item_name = str(item)
+                    item_price = None
+                    item_image = None
+                
+                # Create separate product entry
+                product_dict = {
+                    'product_name': item_name,
+                    'url': f"{url}#product-{idx+1}",
+                    'source_url': url,
+                    'base_price': item_price or base_price,
+                    'product_image': item_image,
+                    'specifications': specifications.copy(),
+                    'extraction_method': extraction_method,
+                    'model': 'LAM',
+                    'has_configurator': config_info.get('has_configurator'),
+                    'configurator_type': config_info.get('configurator_type'),
+                    'requires_interaction': config_info.get('requires_interaction'),
+                    'detection_method': config_info.get('detection_method'),
+                    'customizations': remaining_customizations.copy(),
+                    'customization_categories': list(remaining_customizations.keys()),
+                    'total_customization_options': sum(len(opts) for opts in remaining_customizations.values()),
+                    'extracted_from_multi_product_page': True,
+                    'split_reasoning': analysis.get('recommended_split', {}).get('reasoning', '')
+                }
+                
+                products_list.append(product_dict)
+            
+            return products_list
+            
+        except Exception as e:
+            print(f"  ⚠️  Gemini analysis failed: {e}")
+            print(f"     Falling back to heuristic-based detection")
+            
+            # Fallback to simple heuristic-based detection
+            return self._split_multiple_products_heuristic(
+                url, product_name, base_price, specifications,
+                customizations, extraction_method, config_info
+            )
+    
+    def _split_multiple_products_heuristic(
+        self,
+        url: str,
+        product_name: str,
+        base_price: str,
+        specifications: Dict,
+        customizations: Dict,
+        extraction_method: str,
+        config_info: Dict
+    ) -> List[Dict]:
+        """Fallback heuristic-based product splitting (original logic)."""
+        product_indicating_categories = [
+            'start by selecting',
+            'select a model',
+            'choose a model',
+            'select a coach',
+            'choose a coach',
+            'select your',
+            'choose your',
+            'available models',
+            'available coaches',
+            'available products',
+            'product selection',
+            'model selection'
+        ]
+        
+        # Check if any customization category indicates multiple products
+        multiple_products_detected = False
+        products_category = None
+        
+        for category_name in customizations.keys():
+            category_lower = category_name.lower()
+            if any(indicator in category_lower for indicator in product_indicating_categories):
+                multiple_products_detected = True
+                products_category = category_name
+                break
+        
+        # Also detect if category has many items (>5) with images and prices
+        if not multiple_products_detected:
+            for category_name, items in customizations.items():
+                if len(items) > 5:
+                    # Count how many have images
+                    items_with_images = sum(1 for item in items if isinstance(item, dict) and item.get('image'))
+                    if items_with_images > 5:
+                        multiple_products_detected = True
+                        products_category = category_name
+                        break
+        
+        if not multiple_products_detected:
+            # Return as single product
+            return [{
+                'product_name': product_name,
+                'url': url,
+                'base_price': base_price,
+                'specifications': specifications,
+                'extraction_method': extraction_method,
+                'model': 'LAM',
+                'has_configurator': config_info.get('has_configurator'),
+                'configurator_type': config_info.get('configurator_type'),
+                'requires_interaction': config_info.get('requires_interaction'),
+                'detection_method': config_info.get('detection_method'),
+                'customizations': customizations,
+                'customization_categories': list(customizations.keys()),
+                'total_customization_options': sum(len(opts) for opts in customizations.values())
+            }]
+        
+        # Split into multiple products
+        products_list = []
+        product_items = customizations.get(products_category, [])
+        
+        # Remove the products category from customizations
+        remaining_customizations = {k: v for k, v in customizations.items() if k != products_category}
+        
+        for idx, item in enumerate(product_items):
+            if isinstance(item, dict):
+                item_name = item.get('label', f'{product_name} - Item {idx+1}')
+                item_price = item.get('price')
+                item_image = item.get('image')
+            else:
+                item_name = str(item)
+                item_price = None
+                item_image = None
+            
+            # Create separate product entry
+            product_dict = {
+                'product_name': item_name,
+                'url': f"{url}#product-{idx+1}",  # Add anchor to make unique
+                'source_url': url,  # Keep original URL for reference
+                'base_price': item_price or base_price,
+                'product_image': item_image,
+                'specifications': specifications.copy(),
+                'extraction_method': extraction_method,
+                'model': 'LAM',
+                'has_configurator': config_info.get('has_configurator'),
+                'configurator_type': config_info.get('configurator_type'),
+                'requires_interaction': config_info.get('requires_interaction'),
+                'detection_method': config_info.get('detection_method'),
+                'customizations': remaining_customizations.copy(),
+                'customization_categories': list(remaining_customizations.keys()),
+                'total_customization_options': sum(len(opts) for opts in remaining_customizations.values()),
+                'extracted_from_multi_product_page': True
+            }
+            
+            products_list.append(product_dict)
+        
+        return products_list
     
     def print_statistics(self):
         """Print scraping statistics including LAM-specific stats."""
