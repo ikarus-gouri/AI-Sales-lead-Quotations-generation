@@ -32,8 +32,78 @@ async def run_scraper_async():
     parser.add_argument('--sheets-id', type=str, default=None, help='Google Sheets spreadsheet ID (optional)')
     parser.add_argument('--forceai', action='store_true', help='Force Gemini AI extraction even for static sites (LAM scraper only)')
     parser.add_argument('--intent', type=str, default=None, help='User intent for AI crawler/scraper (e.g., "Extract RV models with prices")')
+    parser.add_argument('--recommend', action='store_true', help='Get AI-powered recommendation from master.py before scraping')
+    parser.add_argument('--recommend-only', action='store_true', help='Only get recommendation, don\'t scrape (use with --recommend)')
+    parser.add_argument('--optimize', action='store_true', default=True, help='Enable AI-powered result optimization (remove duplicates, filter invalid entries)')
+    parser.add_argument('--no-optimize', dest='optimize', action='store_false', help='Disable result optimization')
     
     args = parser.parse_args()
+    
+    # Step 0: Master Flow Recommender (if requested)
+    if args.recommend or args.recommend_only:
+        if not args.intent:
+            print("⚠️  --recommend requires --intent parameter")
+            print("   Example: --intent 'Extract custom projects with pricing info'\n")
+            sys.exit(1)
+        
+        try:
+            from src.master import recommend_scraping_strategy
+            
+            print("\n" + "="*80)
+            print("🧠 MASTER FLOW RECOMMENDER (AI-Powered Strategy)")
+            print("="*80)
+            print(f"Analyzing: {args.url}")
+            print(f"Intent: {args.intent}")
+            print("="*80 + "\n")
+            
+            # Get recommendation
+            recommendation = recommend_scraping_strategy(
+                url=args.url,
+                user_intent=args.intent
+            )
+            
+            print("\n" + "="*80)
+            print("📋 RECOMMENDATION")
+            print("="*80)
+            print(f"Crawler:     {recommendation.crawler}")
+            print(f"Scraper:     {recommendation.scraper}")
+            print(f"Strictness:  {recommendation.strictness}")
+            print("\nReasoning:")
+            for key, value in recommendation.reasoning.items():
+                print(f"  {key}: {value}")
+            
+            if recommendation.exploration_config:
+                print("\nExploration Config:")
+                for key, value in recommendation.exploration_config.items():
+                    print(f"  {key}: {value}")
+            
+            print("\nSuggested Command:")
+            print(f"python run.py --url {args.url} --crawler {recommendation.crawler} --scraper {recommendation.scraper} --strictness {recommendation.strictness} --intent '{args.intent}'")
+            print("="*80 + "\n")
+            
+            if args.recommend_only:
+                print("✓ Recommendation complete (--recommend-only flag set, not scraping)")
+                return
+            
+            # Apply recommendation
+            print("✓ Applying recommendation and proceeding to scrape...\n")
+            args.crawler = recommendation.crawler
+            args.scraper = recommendation.scraper
+            args.strictness = recommendation.strictness
+            
+            # Apply exploration config if available
+            if recommendation.exploration_config:
+                if 'max_pages' in recommendation.exploration_config:
+                    args.max_pages = recommendation.exploration_config['max_pages']
+                if 'max_depth' in recommendation.exploration_config:
+                    args.max_depth = recommendation.exploration_config['max_depth']
+            
+        except ImportError as e:
+            print(f"⚠️  Master recommender not available: {e}")
+            print("   Continuing with manual configuration...\n")
+        except Exception as e:
+            print(f"⚠️  Recommendation failed: {e}")
+            print("   Continuing with manual configuration...\n")
     
     # Handle backward compatibility with --model parameter
     if args.model:
@@ -208,36 +278,37 @@ async def run_scraper_async():
             
             scraper = ScraperSelector(
                 config=config,
-                user_intent=args.intent
+                user_intent=args.intent,
+                optimize_results=args.optimize
             )
         except ImportError as e:
             print(f"⚠️  Auto scraper not available: {e}")
             print("   Falling back to Static scraper\n")
-            scraper = BalancedScraper(config, strictness=args.strictness)
+            scraper = BalancedScraper(config, strictness=args.strictness, optimize_results=args.optimize)
             is_async = False
     
     elif args.scraper == 'lam':
         try:
             from src.core.lam_scraper import LAMScraper
-            scraper = LAMScraper(config, strictness=args.strictness, enable_gemini=True, force_ai=args.forceai)
+            scraper = LAMScraper(config, strictness=args.strictness, enable_gemini=True, force_ai=args.forceai, optimize_results=args.optimize)
         except ImportError as e:
             print(f"⚠️  LAM scraper not available: {e}")
             print("   Falling back to Static scraper\n")
-            scraper = BalancedScraper(config, strictness=args.strictness)
+            scraper = BalancedScraper(config, strictness=args.strictness, optimize_results=args.optimize)
             is_async = False
     
     elif args.scraper == 'ai':
         try:
             from src.core.ai_scraper import AIScraper
-            scraper = AIScraper(config, user_intent=args.intent)
+            scraper = AIScraper(config, user_intent=args.intent, optimize_results=args.optimize)
         except ImportError as e:
             print(f"⚠️  AI scraper not available: {e}")
             print("   Falling back to Static scraper\n")
-            scraper = BalancedScraper(config, strictness=args.strictness)
+            scraper = BalancedScraper(config, strictness=args.strictness, optimize_results=args.optimize)
             is_async = False
     
     else:  # static
-        scraper = BalancedScraper(config, strictness=args.strictness)
+        scraper = BalancedScraper(config, strictness=args.strictness, optimize_results=args.optimize)
     
     # Step 3: Scrape all products
     if args.scraper == 'auto':

@@ -60,7 +60,8 @@ class AIScraper:
         self,
         config: ScraperConfig,
         user_intent: str,
-        gemini_api_key: Optional[str] = None
+        gemini_api_key: Optional[str] = None,
+        optimize_results: bool = True
     ):
         """
         Initialize AI scraper.
@@ -69,9 +70,11 @@ class AIScraper:
             config: Scraper configuration
             user_intent: Natural language intent (e.g., "Extract custom projects with pricing")
             gemini_api_key: Optional Gemini API key (uses env if not provided)
+            optimize_results: Enable post-processing optimization to remove duplicates and invalid entries
         """
         self.config = config
         self.user_intent = user_intent
+        self.optimize_results = optimize_results
         
         # Get API keys (Jina API key is optional - r.jina.ai is free to use)
         self.jina_api_key = os.getenv('JINA_API_KEY')  # Optional
@@ -95,6 +98,20 @@ class AIScraper:
         self.csv_storage = CSVStorage()
         self.quotation_template = QuotationTemplate()
         self.google_sheets = None
+        
+        # Initialize optimizer
+        if optimize_results:
+            try:
+                self.optimizer = CatalogOptimizer(
+                    gemini_api_key=self.gemini_api_key,
+                    user_intent=user_intent
+                )
+            except Exception as e:
+                print(f"⚠️  Optimizer initialization failed: {e}")
+                self.optimize_results = False
+                self.optimizer = None
+        else:
+            self.optimizer = None
         
         # Statistics
         self.stats = {
@@ -361,18 +378,25 @@ RULES:
             print(f"  ✗ Gemini extraction failed: {e}")
             return None
     
-    def save_catalog(
+    async def save_catalog(
         self,
         catalog: Dict,
         export_formats: List[str] = None
     ):
         """
-        Save catalog in multiple formats.
+        Save catalog in multiple formats with optional optimization.
         
         Args:
             catalog: Product/offering catalog
             export_formats: List of formats ('json', 'csv', 'xlsx', 'sheets')
         """
+        # Optimize catalog if enabled
+        if self.optimize_results and self.optimizer:
+            print(f"\n{'='*80}")
+            print("OPTIMIZING RESULTS")
+            print(f"{'='*80}")
+            catalog = await self.optimizer.optimize_catalog(catalog)
+        
         if export_formats is None:
             export_formats = ['json']
         

@@ -43,7 +43,8 @@ class ScraperSelector:
         self,
         config: ScraperConfig,
         gemini_api_key: Optional[str] = None,
-        user_intent: Optional[str] = None
+        user_intent: Optional[str] = None,
+        optimize_results: bool = True
     ):
         """
         Initialize scraper selector.
@@ -52,9 +53,11 @@ class ScraperSelector:
             config: Scraper configuration
             gemini_api_key: Gemini API key for analysis
             user_intent: User's extraction intent (for AI scraper)
+            optimize_results: Enable post-processing optimization to remove duplicates and invalid entries
         """
         self.config = config
         self.user_intent = user_intent or config.user_intent or "Extract product information"
+        self.optimize_results = optimize_results
         
         # Get API key
         self.gemini_api_key = gemini_api_key or os.getenv('GEMINI_API_KEY') or os.getenv('GEMINAI_API_KEY')
@@ -71,18 +74,50 @@ class ScraperSelector:
         self._static_scraper = None
         self._ai_scraper = None
         
+        # Initialize optimizer
+        if optimize_results:
+            try:
+                self.optimizer = CatalogOptimizer(
+                    gemini_api_key=self.gemini_api_key,
+                    user_intent=self.user_intent
+                )
+            except Exception as e:
+                print(f"⚠️  Optimizer initialization failed: {e}")
+                self.optimize_results = False
+                self.optimizer = None
+        else:
+            self.optimizer = None
+        
         # Statistics
         self.stats = {
             'total_urls': 0,
             'lam_assigned': 0,
             'static_assigned': 0,
             'ai_assigned': 0,
+            'blog_skipped': 0,
             'errors': 0
         }
         
         print(f"\033[32m[✓]\033[0m Scraper Selector initialized")
         print(f"  Mode: Intelligent Routing (Gemini-powered)")
         print(f"  Intent: {self.user_intent}")
+    
+    def _is_blog_or_faq_url(self, url: str) -> bool:
+        """Detect if URL is a blog, FAQ, or question-based content page."""
+        url_lower = url.lower()
+        
+        # Common blog/FAQ/question patterns in URLs
+        blog_patterns = [
+            '/blog', '/blogs', '/article', '/articles', '/news',
+            '/faq', '/faqs', '/questions', '/q-and-a', '/qa',
+            '/how-to', '/guide', '/guides', '/tips', '/advice',
+            '/learn', '/learning', '/tutorial', '/tutorials',
+            '/what-is', '/why-', '/when-', '/where-', '/how-',
+            '/resources', '/insights', '/stories', '/posts',
+            '?p=', '?page_id=', '?article=', '?post='
+        ]
+        
+        return any(pattern in url_lower for pattern in blog_patterns)
     
     def _get_lam_scraper(self) -> LAMScraper:
         """Lazy initialize LAM scraper."""
@@ -93,7 +128,7 @@ class ScraperSelector:
                 enable_gemini=True,
                 gemini_api_key=self.gemini_api_key,
                 force_ai=False,
-                headless=True
+                headless=False
             )
         return self._lam_scraper
     
@@ -137,13 +172,51 @@ class ScraperSelector:
         
         self.stats['total_urls'] = len(product_urls)
         
-        # Step 1: Analyze all URLs and assign scrapers
-        assignments = await self._analyze_urls(list(product_urls))
+        # Step 0: Pre-filter blog and FAQ URLs
+        print("Phase 0: Pre-filtering blog/FAQ URLs...")
+        print("-" * 80)
+        filtered_urls = []
+        blog_urls = []
         
-        # Step 2: Group by scraper type
+        for url in product_urls:
+            if self._is_blog_or_faq_url(url):
+                blog_urls.append(url)
+                print(f"  📝 SKIPPING (Blog/FAQ): {url}")
+            else:
+                filtered_urls.append(url)
+        
+        self.stats['blog_skipped'] = len(blog_urls)
+        
+        if blog_urls:
+            print(f"\n✓ Filtered out {len(blog_urls)} blog/FAQ URLs")
+        print(f"✓ {len(filtered_urls)} URLs remaining for analysis\n")
+        
+        if not filtered_urls:
+            print("⚠️  No URLs remaining after filtering")
+            return {
+                'products': [],
+                'total_products': 0,
+                'scraper_assignments': {'lam': 0, 'static': 0, 'ai': 0, 'blog_skipped': len(blog_urls)},
+                'model': 'INTELLIGENT_ROUTING',
+                'workflow': 'analyze_then_route'
+            }
+        
+        # Step 1: Analyze remaining URLs and assign scrapers
+        assignments = await self._analyze_urls(filtered_urls)
+        
+        # Step 2: Group by scraper type (filter out SKIP/BLOG types)
         lam_urls = [a.url for a in assignments if a.scraper_type == 'LAM']
         static_urls = [a.url for a in assignments if a.scraper_type == 'STATIC']
         ai_urls = [a.url for a in assignments if a.scraper_type == 'AI']
+        
+        # Count additional blog/skip classifications from Gemini
+        gemini_skipped = [a for a in assignments if a.scraper_type in ['SKIP', 'BLOG']]
+        if gemini_skipped:
+            self.stats['blog_skipped'] += len(gemini_skipped)
+            print(f"\n📝 Gemini detected {len(gemini_skipped)} additional blog/FAQ URLs to skip")
+            for assignment in gemini_skipped:
+                print(f"  → {assignment.url}")
+                print(f"     Reason: {assignment.reasoning}")
         
         self.stats['lam_assigned'] = len(lam_urls)
         self.stats['static_assigned'] = len(static_urls)
@@ -153,6 +226,7 @@ class ScraperSelector:
         print(f"   LAM Scraper: {len(lam_urls)} URLs (interactive configurators)")
         print(f"   Static Scraper: {len(static_urls)} URLs (standard products)")
         print(f"   AI Scraper: {len(ai_urls)} URLs (vague/services/projects)")
+        print(f"   Skipped (Blogs/FAQs): {self.stats['blog_skipped']} URLs")
         
         # Step 3: Scrape with assigned scrapers
         all_products = []
@@ -199,11 +273,19 @@ class ScraperSelector:
             'scraper_assignments': {
                 'lam': len(lam_urls),
                 'static': len(static_urls),
-                'ai': len(ai_urls)
+                'ai': len(ai_urls),
+                'blog_skipped': self.stats['blog_skipped']
             },
             'model': 'INTELLIGENT_ROUTING',
             'workflow': 'analyze_then_route'
         }
+        
+        # Optimize catalog if enabled
+        if self.optimize_results and self.optimizer:
+            print(f"\n{'='*80}")
+            print("OPTIMIZING RESULTS")
+            print(f"{'='*80}")
+            catalog = await self.optimizer.optimize_catalog(catalog)
         
         self._print_final_summary(catalog)
         
@@ -298,7 +380,6 @@ AVAILABLE SCRAPERS:
    - Custom work examples
    - Pages without clear product structure
    - Content that requires semantic understanding
-   - Blog-style product descriptions
    - Non-standard content formats
    
    SIGNALS:
@@ -309,13 +390,30 @@ AVAILABLE SCRAPERS:
    - Requires semantic understanding to extract value
    - Not a traditional product page
 
+4. **SKIP** (Do Not Scrape)
+   USE FOR:
+   - Blog posts and articles about products
+   - FAQ pages with questions and answers
+   - Question-based content (How-to, What is, Why, etc.)
+   - News articles and press releases
+   - Educational content and tutorials
+   - General information pages without products
+   - Resource pages and guides
+   
+   SIGNALS:
+   - URL contains: /blog, /article, /faq, /questions, /how-to, /guide, /news
+   - Page title suggests blog/article/FAQ format
+   - Question-based titles ("How to...", "What is...", "Why...", etc.)
+   - Informational content without product listings
+   - Educational or news-oriented content
+
 TASK: For each URL, determine the BEST scraper.
 
 Return JSON array:
 [
   {{
     "url_number": 1,
-    "scraper_type": "LAM" | "STATIC" | "AI",
+    "scraper_type": "LAM" | "STATIC" | "AI" | "SKIP",
     "confidence": 0.85,
     "reasoning": "brief explanation of why this scraper",
     "page_characteristics": {{
@@ -324,18 +422,22 @@ Return JSON array:
       "is_service": boolean,
       "is_project": boolean,
       "is_structured": boolean,
-      "content_type": "product|service|project|configurator|standard"
+      "is_blog": boolean,
+      "is_faq": boolean,
+      "content_type": "product|service|project|configurator|standard|blog|faq"
     }}
   }}
 ]
 
 IMPORTANT DECISION RULES:
+- **HIGHEST PRIORITY**: If URL is blog/FAQ/question-based/news/article → SKIP
 - If URL suggests configurator (build/configure/customize) → LAM
 - If URL is standard product with clear structure → STATIC
 - If page is service/project/case-study/vague → AI
 - Default to STATIC for typical product pages
 - Use LAM only when interaction is needed
 - Use AI when content is non-standard or semantic extraction helps
+- **ALWAYS SKIP** blogs, FAQs, news articles, how-to guides, and question-based content
 
 Return valid JSON only, no explanations.
 """
@@ -368,7 +470,9 @@ Return valid JSON only, no explanations.
                     icon = {
                         'LAM': '🤖',
                         'STATIC': '📄',
-                        'AI': '🧠'
+                        'AI': '🧠',
+                        'SKIP': '🚫',
+                        'BLOG': '📝'
                     }.get(assignment.scraper_type, '❓')
                     
                     print(f"  {icon} {assignment.scraper_type:8} → {urls[url_num]}")
@@ -402,6 +506,7 @@ Return valid JSON only, no explanations.
         print(f"   LAM Scraper: {self.stats['lam_assigned']} URLs")
         print(f"   Static Scraper: {self.stats['static_assigned']} URLs")
         print(f"   AI Scraper: {self.stats['ai_assigned']} URLs")
+        print(f"   Skipped (Blogs/FAQs): {self.stats['blog_skipped']} URLs")
         print(f"   Total products extracted: {catalog['total_products']}")
         print(f"   Errors: {self.stats['errors']}")
         print(f"{'='*80}\n")
@@ -501,6 +606,7 @@ Return valid JSON only, no explanations.
         print(f"   LAM Scraper: {self.stats['lam_assigned']} URLs")
         print(f"   Static Scraper: {self.stats['static_assigned']} URLs")
         print(f"   AI Scraper: {self.stats['ai_assigned']} URLs")
+        print(f"   Skipped (Blogs/FAQs): {self.stats['blog_skipped']} URLs")
         print(f"   Errors: {self.stats['errors']}")
         
         # Sample products

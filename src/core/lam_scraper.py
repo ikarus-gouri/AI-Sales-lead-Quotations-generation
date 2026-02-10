@@ -48,7 +48,7 @@ class GeminiConfiguatorConsultant:
         markdown: str
     ) -> Dict:
         """
-        Consult Gemini to determine if interactive extraction should be used.
+        Consult Gemini to determine the best extraction method.
         
         Args:
             url: Product page URL
@@ -56,10 +56,11 @@ class GeminiConfiguatorConsultant:
             markdown: Page content
             
         Returns:
-            Dictionary with decision and reasoning
+            Dictionary with extraction_method ('INTERACTIVE', 'STATIC', or 'AI') and reasoning
         """
         if not self.enabled:
             return {
+                'extraction_method': 'STATIC',
                 'use_interactive': False,
                 'reason': 'Gemini not available',
                 'configurator_url': configurator_info.get('configurator_url'),
@@ -69,6 +70,7 @@ class GeminiConfiguatorConsultant:
         # Only consult Gemini for high confidence configurators
         if configurator_info.get('confidence', 0) < 0.6:
             return {
+                'extraction_method': 'STATIC',
                 'use_interactive': False,
                 'reason': 'Configurator confidence too low',
                 'configurator_url': configurator_info.get('configurator_url'),
@@ -77,7 +79,7 @@ class GeminiConfiguatorConsultant:
         
         try:
             prompt = f"""
-Analyze this product page to determine if interactive browser-based extraction is needed.
+Analyze this product page to determine the BEST EXTRACTION METHOD.
 
 Product URL: {url}
 Configurator Detected: {configurator_info.get('has_configurator')}
@@ -89,28 +91,52 @@ Indicators: {configurator_info.get('indicators')}
 Page Content (first 3000 chars):
 {markdown[:3000]}
 
-TASK: Determine if this configurator requires interactive browser-based extraction.
+TASK: Determine the optimal extraction method for this product page.
+
+AVAILABLE METHODS:
+
+1. **INTERACTIVE** (Playwright + Gemini browser automation)
+   USE WHEN:
+   - Configurator requires clicking through tabs/accordions/option cards
+   - Content loads dynamically based on user interaction
+   - Options are revealed progressively through clicks
+   - Complex multi-step configuration process
+   - JavaScript-heavy interactive elements
+
+2. **STATIC** (Traditional HTML/Markdown extraction)
+   USE WHEN:
+   - All options and data are visible in the HTML/markdown
+   - Simple form-based configuration with static options
+   - Options are presented in flat lists/tables
+   - Well-structured, non-interactive content
+   - Standard product page with clear structure
+
+3. **AI** (Gemini semantic extraction)
+   USE WHEN:
+   - Content is vague or unstructured
+   - Service descriptions or project pages (not standard products)
+   - Requires semantic understanding to extract meaningful data
+   - Non-standard content format or mixed content types
+   - Page has narrative descriptions rather than structured data
+   - Product info embedded in paragraphs/stories
 
 Return JSON with:
 {{
-  "use_interactive": boolean,
-  "reason": "string - why or why not",
+  "extraction_method": "INTERACTIVE" | "STATIC" | "AI",
+  "use_interactive": boolean (for backward compatibility),
+  "reason": "string - explanation of chosen method",
   "recommended_url": "string - best URL to extract from",
   "complexity_score": number (0-10),
   "requires_clicks": boolean,
-  "has_dynamic_content": boolean
+  "has_dynamic_content": boolean,
+  "content_structure": "structured" | "semi-structured" | "unstructured"
 }}
 
-Use interactive extraction (Playwright + Gemini) IF:
-- The configurator requires clicking through tabs/accordions/cards
-- Content loads dynamically based on user interaction
-- Options are revealed progressively
-- Complex multi-step configuration process
-
-Use static extraction IF:
-- All options are visible in the HTML
-- Simple form-based configuration
-- Options are in a flat list/table
+DECISION RULES:
+- If interactive elements require clicking → INTERACTIVE
+- If all data is visible in clean HTML/markdown → STATIC  
+- If content is vague, narrative, or needs semantic extraction → AI
+- Default to STATIC for typical product pages
 
 Only return valid JSON.
 """
@@ -137,11 +163,20 @@ Only return valid JSON.
             result = json.loads(response_text)
             result['confidence'] = configurator_info.get('confidence', 0)
             
+            # Ensure extraction_method is set (backward compatibility)
+            if 'extraction_method' not in result:
+                result['extraction_method'] = 'INTERACTIVE' if result.get('use_interactive') else 'STATIC'
+            
+            # Ensure use_interactive is set (backward compatibility)
+            if 'use_interactive' not in result:
+                result['use_interactive'] = (result.get('extraction_method') == 'INTERACTIVE')
+            
             return result
             
         except Exception as e:
             print(f"  ⚠️ Gemini consultation failed: {e}")
             return {
+                'extraction_method': 'STATIC',
                 'use_interactive': False,
                 'reason': f'Gemini error: {str(e)}',
                 'configurator_url': configurator_info.get('configurator_url'),
@@ -163,7 +198,8 @@ class LAMScraper(BalancedScraper):
         enable_gemini: bool = True,
         gemini_api_key: Optional[str] = None,
         force_ai: bool = False,
-        headless: bool = True
+        headless: bool = False,
+        optimize_results: bool = True
     ):
         """
         Initialize LAM scraper.
@@ -175,6 +211,7 @@ class LAMScraper(BalancedScraper):
             gemini_api_key: Optional Gemini API key
             force_ai: Force Gemini AI extraction even for static sites
             headless: Run Playwright in headless mode (default True for server environments)
+            optimize_results: Enable post-processing optimization to remove duplicates and invalid entries
         """
         # Initialize parent (BalancedScraper)
         super().__init__(config, strictness=strictness)
@@ -183,8 +220,23 @@ class LAMScraper(BalancedScraper):
         self.enable_gemini = enable_gemini
         self.force_ai = force_ai
         self.headless = headless
+        self.optimize_results = optimize_results
         self.gemini_consultant = GeminiConfiguatorConsultant(gemini_api_key)
         self.gemini_extractor = None
+        
+        # Initialize optimizer
+        if optimize_results:
+            try:
+                self.optimizer = CatalogOptimizer(
+                    gemini_api_key=gemini_api_key,
+                    user_intent=config.user_intent
+                )
+            except Exception as e:
+                print(f"⚠️  Optimizer initialization failed: {e}")
+                self.optimize_results = False
+                self.optimizer = None
+        else:
+            self.optimizer = None
         
         if enable_gemini and self.gemini_consultant.enabled:
             try:
@@ -204,6 +256,7 @@ class LAMScraper(BalancedScraper):
             'gemini_consultations': 0,
             'interactive_extractions': 0,
             'static_fallbacks': 0,
+            'ai_extractions': 0,
             'gemini_failures': 0
         }
     
@@ -279,6 +332,161 @@ class LAMScraper(BalancedScraper):
         
         self._current_customizations = customizations
         return source
+    
+    async def _extract_with_ai_method(
+        self,
+        url: str,
+        markdown: str,
+        product_name: str,
+        config_info: Dict
+    ) -> Optional[List[Dict]]:
+        """
+        Extract product data using AI semantic extraction (Gemini).
+        
+        This method is used when Gemini determines the page content requires
+        semantic understanding rather than structured extraction.
+        
+        Args:
+            url: Product page URL
+            markdown: Page content
+            product_name: Product name
+            config_info: Configurator info
+            
+        Returns:
+            List of product dictionaries or None if extraction fails
+        """
+        try:
+            import json
+            from ..utils.http_client import JinaClient
+            
+            # Fetch fresh content with Jina for better quality
+            jina_client = JinaClient(api_key=os.getenv('JINA_API_KEY'))
+            try:
+                page = jina_client.fetch(url)
+                markdown = page.text
+                page_title = page.title
+            except Exception as e:
+                print(f"     ⚠️ Jina fetch failed, using existing markdown: {e}")
+                page_title = product_name
+            
+            if not markdown:
+                return None
+            
+            # Use Gemini for semantic extraction
+            prompt = f"""
+You are extracting structured product data from a webpage using semantic understanding.
+
+URL: {url}
+PAGE TITLE: {page_title}
+PRODUCT NAME: {product_name}
+
+PAGE CONTENT (first 8000 chars):
+{markdown[:8000]}
+
+TASK:
+Extract ALL products/services/projects/offerings from this page with semantic understanding.
+
+CRITICAL DISTINCTION:
+- If the page shows DIFFERENT PRODUCTS/MODELS → Extract each as SEPARATE item
+- If the page shows ONE PRODUCT with OPTIONS → Extract as ONE item with customizations
+
+OUTPUT STRICT JSON (ARRAY):
+[
+  {{
+    "product_name": "Name of product",
+    "page_type": "PRODUCT or OFFERING",
+    "base_price": "Price string or null",
+    "price_note": "Custom quote, Starting from, etc.",
+    "specifications": {{
+      "spec_name": "value"
+    }},
+    "customizations": {{
+      "category": ["option1", "option2"]
+    }},
+    "description": "Brief product description",
+    "features": ["feature1", "feature2"]
+  }}
+]
+
+RULES:
+- Use semantic understanding to extract meaningful data
+- If multiple distinct products exist, create SEPARATE array items
+- If ONE product with options exists, create ONE array item with customizations
+- specifications: technical specs, dimensions, materials
+- customizations: options/variants for this product
+- If no price shown, set base_price to null and price_note to "Custom quote"
+- Return ONLY JSON array, no explanations
+- Even if only one item, return it in an array
+"""
+            
+            # Initialize Gemini model
+            if not hasattr(self, '_ai_gemini_model'):
+                import google.generativeai as genai
+                api_key = os.getenv('GEMINI_API_KEY') or os.getenv('GEMINAI_API_KEY')
+                genai.configure(api_key=api_key)
+                self._ai_gemini_model = genai.GenerativeModel("gemini-2.5-flash")
+            
+            response = self._ai_gemini_model.generate_content(
+                prompt,
+                generation_config={
+                    "temperature": 0.1,
+                    "response_mime_type": "application/json"
+                }
+            )
+            
+            extracted_data = json.loads(response.text)
+            
+            # Ensure we have a list
+            if isinstance(extracted_data, dict):
+                extracted_data = [extracted_data]
+            elif not isinstance(extracted_data, list):
+                print(f"     ✗ Gemini returned invalid format: {type(extracted_data)}")
+                return None
+            
+            if not extracted_data:
+                print(f"     ✗ Gemini returned empty list")
+                return None
+            
+            # Build final product data for each extracted item
+            products_list = []
+            for item in extracted_data:
+                if not isinstance(item, dict):
+                    continue
+                
+                product_data = {
+                    "product_name": item.get("product_name", product_name),
+                    "url": url,
+                    "page_type": item.get("page_type", "PRODUCT"),
+                    "base_price": item.get("base_price"),
+                    "price_note": item.get("price_note", ""),
+                    "specifications": item.get("specifications", {}),
+                    "customizations": item.get("customizations", {}),
+                    "description": item.get("description", ""),
+                    "features": item.get("features", []),
+                    "total_customization_options": sum(
+                        len(opts) for opts in item.get("customizations", {}).values()
+                    ),
+                    
+                    # LAM metadata
+                    "extraction_method": "ai_semantic",
+                    "model": "LAM",
+                    "has_configurator": config_info.get('has_configurator'),
+                    "configurator_type": config_info.get('configurator_type'),
+                    "detection_method": config_info.get('detection_method')
+                }
+                products_list.append(product_data)
+            
+            if products_list:
+                print(f"     ✓ AI extraction successful: {len(products_list)} item(s)")
+                self.lam_stats['ai_extractions'] += 1
+                return products_list
+            else:
+                print(f"     ✗ No valid items extracted")
+                return None
+        
+        except Exception as e:
+            print(f"     ✗ AI extraction failed: {e}")
+            return None
     
     def _convert_gemini_options(self, gemini_options: List[Dict]) -> Dict:
         """
@@ -539,39 +747,59 @@ Only return valid JSON.
         configurators_found = sum(1 for c in configurator_map.values() if c['has_configurator'])
         
         if configurators_found == 0 and not self.force_ai:
-            print(f"\n{'⚠️'*40}")
-            print(f"⚠️  NO CONFIGURATORS DETECTED")
-            print(f"⚠️  Automatically switching to Model S (Static Extraction)")
-            print(f"⚠️  (Use --forceai to force Gemini extraction)")
-            print(f"{'⚠️'*40}\n")
+            print(f"\n{'='*40}")
+            print(f"🧠  NO CONFIGURATORS DETECTED")
+            print(f"🧠  Automatically switching to AI Semantic Extraction")
+            print(f"🧠  Using Gemini for intelligent content understanding")
+            print(f"{'='*40}\n")
             
-            # Fall back to parent class (BalancedScraper = Model S) workflow
+            # Use AI extraction for all pages when no configurators detected
             products = []
             for i, url in enumerate(product_urls, 1):
-                print(f"\n[{i}/{len(product_urls)}] Processing with Model S: {url}")
+                print(f"\n[{i}/{len(product_urls)}] Processing with AI Extraction: {url}")
                 
-                # Use parent's scrape_product method (sync)
-                product_data = super().scrape_product(url)
+                # Fetch page content
+                markdown = self.http_client.scrape_with_jina(url)
+                if not markdown:
+                    print(f"  ✗ Failed to fetch page")
+                    continue
                 
-                if product_data:
-                    products.append(product_data)
+                # Extract basic info for AI method
+                product_name = self.product_extractor.extract_product_name(url, markdown)
+                config_info = {
+                    'has_configurator': False,
+                    'configurator_type': 'none',
+                    'confidence': 0.0,
+                    'detection_method': 'none'
+                }
+                
+                # Use AI extraction method
+                print(f"  🧠 Using AI semantic extraction...")
+                products_from_page = await self._extract_with_ai_method(url, markdown, product_name, config_info)
+                
+                if products_from_page:
+                    products.extend(products_from_page)
+                    print(f"  ✓ Added {len(products_from_page)} item(s) from AI extraction")
+                else:
+                    print(f"  ✗ AI extraction failed")
                 
                 # Respect crawl delay
                 if i < len(product_urls):
-                    time.sleep(self.config.crawl_delay)
+                    await asyncio.sleep(self.config.crawl_delay)
             
             catalog = {
                 'products': products,
                 'total_products': len(products),
                 'configurators_detected': 0,
-                'model': 'S (auto-fallback from LAM)',
-                'workflow': 'static_extraction'
+                'model': 'LAM (AI Extraction Mode)',
+                'workflow': 'ai_semantic_extraction'
             }
             
             print(f"\n{'='*80}")
-            print(f"[Model S] Extraction Complete (LAM auto-fallback)")
+            print(f"[LAM-AI] Extraction Complete")
             print(f"{'='*80}")
             print(f"  Total products: {len(products)}")
+            print(f"  Extraction method: AI Semantic")
             
             return catalog
         
@@ -652,9 +880,61 @@ Only return valid JSON.
         customizations = {}
         extraction_method = 'none'
         
-        # Decide extraction method based on Gemini's recommendation
-        if config_info.get('requires_interaction') and self.gemini_extractor:
-            # Use Gemini + Playwright (async - now properly awaited)
+        # Consult Gemini for extraction method (if enabled)
+        if self.gemini_consultant.enabled and config_info.get('has_configurator'):
+            self.lam_stats['gemini_consultations'] += 1
+            
+            print(f"  🤖 Consulting Gemini for extraction method...")
+            consultation = self.gemini_consultant.should_use_interactive_extraction(
+                url, config_info, markdown
+            )
+            
+            recommended_method = consultation.get('extraction_method', 'STATIC')
+            print(f"  🤖 Gemini recommends: {recommended_method}")
+            print(f"     Reason: {consultation.get('reason', 'N/A')}")
+            
+            # Route to appropriate extraction method
+            if recommended_method == 'INTERACTIVE' and self.gemini_extractor:
+                # Use Gemini + Playwright interactive extraction
+                result = await self.extract_with_gemini_playwright(url, config_info)
+                if result['success']:
+                    customizations = result['customizations']
+                    extraction_method = 'gemini_interactive'
+                    self.lam_stats['interactive_extractions'] += 1
+                else:
+                    # Fallback to static
+                    extraction_method = self._extract_static_fallback(
+                        url, markdown, product_name, config_info
+                    )
+                    customizations = self._get_extracted_customizations()
+                    self.lam_stats['static_fallbacks'] += 1
+            
+            elif recommended_method == 'AI':
+                # Use AI semantic extraction
+                print(f"  🧠 Using AI semantic extraction...")
+                result = await self._extract_with_ai_method(url, markdown, product_name, config_info)
+                if result:
+                    # AI extraction returns complete product data
+                    return result
+                else:
+                    # Fallback to static
+                    extraction_method = self._extract_static_fallback(
+                        url, markdown, product_name, config_info
+                    )
+                    customizations = self._get_extracted_customizations()
+                    self.lam_stats['static_fallbacks'] += 1
+            
+            else:
+                # Use static extraction (STATIC method or fallback)
+                extraction_method = self._extract_static_fallback(
+                    url, markdown, product_name, config_info
+                )
+                customizations = self._get_extracted_customizations()
+                self.lam_stats['static_fallbacks'] += 1
+        
+        # Legacy path: Direct decision based on requires_interaction flag
+        elif config_info.get('requires_interaction') and self.gemini_extractor:
+            # Use Gemini + Playwright
             result = await self.extract_with_gemini_playwright(url, config_info)
             if result['success']:
                 customizations = result['customizations']
@@ -677,9 +957,17 @@ Only return valid JSON.
             self.lam_stats['static_fallbacks'] += 1
         
         else:
-            # No configurator, extract from page
-            customizations = self.product_extractor.extract_customizations(markdown)
-            extraction_method = 'product_page'
+            # No configurator detected on this page - use AI semantic extraction
+            print(f"  🧠 No configurator detected - using AI semantic extraction...")
+            result = await self._extract_with_ai_method(url, markdown, product_name, config_info)
+            if result:
+                # AI extraction returns complete product data
+                return result
+            else:
+                # Fallback to basic extraction if AI fails
+                print(f"  ⚠️ AI extraction failed, using basic extraction...")
+                customizations = self.product_extractor.extract_customizations(markdown)
+                extraction_method = 'product_page'
         
         # Check if customizations are actually multiple distinct products
         products_list = self._split_multiple_products(
@@ -995,12 +1283,13 @@ Only return valid JSON.
         print(f"\n\033[36m[LAM STATS]\033[0m Gemini Usage:")
         print(f"   Gemini consultations: {self.lam_stats['gemini_consultations']}")
         print(f"   Interactive extractions: {self.lam_stats['interactive_extractions']}")
+        print(f"   AI semantic extractions: {self.lam_stats['ai_extractions']}")
         print(f"   Static fallbacks: {self.lam_stats['static_fallbacks']}")
         print(f"   Gemini failures: {self.lam_stats['gemini_failures']}")
         
         if self.lam_stats['gemini_consultations'] > 0:
             success_rate = (
-                self.lam_stats['interactive_extractions'] 
+                (self.lam_stats['interactive_extractions'] + self.lam_stats['ai_extractions'])
                 / self.lam_stats['gemini_consultations'] * 100
             )
             print(f"   Gemini success rate: {success_rate:.1f}%")

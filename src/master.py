@@ -480,7 +480,7 @@ class GeminiFlowRecommender:
                 reasoning=recommendation_data.get('reasoning', {}),
                 fallback_plan=recommendation_data.get('fallback_plan', []),
                 exploration_config=recommendation_data.get('exploration_config', {
-                    'max_pages': 50,
+                    'max_pages': 10,
                     'max_depth': 3,
                     'crawl_delay': 0.5
                 })
@@ -569,7 +569,7 @@ OUTPUT FORMAT (JSON):
     {{"crawler": "ai", "scraper": "ai", "reason": "last resort for complex sites"}}
   ],
   "exploration_config": {{
-    "max_pages": 50,
+    "max_pages": 10,
     "max_depth": 3,
     "crawl_delay": 0.5,
     "stopping_rules": ["stop if blog density > 70%", "stop if no products after 20 pages"]
@@ -622,10 +622,10 @@ Respond ONLY with valid JSON matching the format above.
                 {'crawler': 'ai', 'scraper': 'ai', 'reason': 'if semantic extraction needed'}
             ],
             exploration_config={
-                'max_pages': 50,
+                'max_pages': 10,
                 'max_depth': 3,
                 'crawl_delay': 0.5,
-                'stopping_rules': ['stop if no products after 30 pages']
+                'stopping_rules': ['stop if no products after 10 pages']
             }
         )
 

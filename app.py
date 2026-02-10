@@ -18,6 +18,7 @@ import traceback
 from src.core.config import ScraperConfig
 from src.core.balanced_scraper import BalancedScraper
 from src.storage.google_sheets import GoogleSheetsStorage
+from src.master import recommend_scraping_strategy, FlowRecommendation
 
 
 # ============================================================
@@ -112,6 +113,7 @@ class ScrapeRequest(BaseModel):
     headless: bool = Field(True, description="Deprecated parameter (no browser mode)")
     force_ai: bool = Field(False, description="Force Gemini AI extraction even for static sites (LAM scraper only)")
     intent: Optional[str] = Field(None, description="User intent for AI crawler or LAM/AI scraper")
+    optimize: bool = Field(True, description="Enable AI-powered result optimization (remove duplicates, filter invalid entries)")
     google_sheets_upload: bool = Field(False, description="Upload results to Google Sheets")
     google_sheets_id: Optional[str] = Field(None, description="Existing spreadsheet ID (uses env default if not provided)")
 
@@ -159,6 +161,19 @@ class GoogleSheetsUploadRequest(BaseModel):
                 "spreadsheet_id": None,
                 "spreadsheet_title": "My Product Catalog",
                 "include_prices": True
+            }
+        }
+
+
+class RecommendRequest(BaseModel):
+    url: HttpUrl
+    intent: str = Field(..., description="What you want to extract (e.g., 'Extract products with pricing')")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "url": "https://example.com",
+                "intent": "Extract all products with customization options and pricing"
             }
         }
 
@@ -340,7 +355,8 @@ async def run_scraper_job_async(job_id: str, request: ScrapeRequest):
                 
                 scraper_instance = ScraperSelector(
                     config=config,
-                    user_intent=request.intent or "Extract products with details"
+                    user_intent=request.intent or "Extract products with details",
+                    optimize_results=request.optimize
                 )
                 
                 jobs[job_id]["progress"] = {
@@ -350,7 +366,7 @@ async def run_scraper_job_async(job_id: str, request: ScrapeRequest):
             except ImportError as e:
                 print(f"⚠️ Auto scraper not available: {e}, falling back to static")
                 from src.core.balanced_scraper import BalancedScraper
-                scraper_instance = BalancedScraper(config, strictness=request.strictness)
+                scraper_instance = BalancedScraper(config, strictness=request.strictness, optimize_results=request.optimize)
                 is_async = False
                 jobs[job_id]["progress"] = {
                     "stage": "extracting",
@@ -369,7 +385,8 @@ async def run_scraper_job_async(job_id: str, request: ScrapeRequest):
                     strictness=request.strictness, 
                     enable_gemini=True, 
                     force_ai=request.force_ai,
-                    headless=headless_mode
+                    headless=headless_mode,
+                    optimize_results=request.optimize
                 )
                 
                 force_ai_msg = " (Force AI Mode)" if request.force_ai else ""
@@ -380,7 +397,7 @@ async def run_scraper_job_async(job_id: str, request: ScrapeRequest):
             except ImportError as e:
                 print(f"⚠️ LAM scraper not available: {e}, falling back to static")
                 from src.core.balanced_scraper import BalancedScraper
-                scraper_instance = BalancedScraper(config, strictness=request.strictness)
+                scraper_instance = BalancedScraper(config, strictness=request.strictness, optimize_results=request.optimize)
                 is_async = False
                 jobs[job_id]["progress"] = {
                     "stage": "extracting",
@@ -390,7 +407,7 @@ async def run_scraper_job_async(job_id: str, request: ScrapeRequest):
         elif scraper == 'ai':
             try:
                 from src.core.ai_scraper import AIScraper
-                scraper_instance = AIScraper(config, user_intent=request.intent or "Extract products with details")
+                scraper_instance = AIScraper(config, user_intent=request.intent or "Extract products with details", optimize_results=request.optimize)
                 jobs[job_id]["progress"] = {
                     "stage": "extracting",
                     "message": "[AI Scraper] Extracting with AI-powered methods"
@@ -398,7 +415,7 @@ async def run_scraper_job_async(job_id: str, request: ScrapeRequest):
             except ImportError as e:
                 print(f"⚠️ AI scraper not available: {e}, falling back to static")
                 from src.core.balanced_scraper import BalancedScraper
-                scraper_instance = BalancedScraper(config, strictness=request.strictness)
+                scraper_instance = BalancedScraper(config, strictness=request.strictness, optimize_results=request.optimize)
                 is_async = False
                 jobs[job_id]["progress"] = {
                     "stage": "extracting",
@@ -407,7 +424,7 @@ async def run_scraper_job_async(job_id: str, request: ScrapeRequest):
         
         else:  # static
             from src.core.balanced_scraper import BalancedScraper
-            scraper_instance = BalancedScraper(config, strictness=request.strictness)
+            scraper_instance = BalancedScraper(config, strictness=request.strictness, optimize_results=request.optimize)
             jobs[job_id]["progress"] = {
                 "stage": "crawling",
                 "message": f"Discovering pages (strictness: {request.strictness})"
@@ -731,6 +748,38 @@ def get_features():
         "strictness_levels": ["lenient", "balanced", "strict"],
         "export_formats": ["json", "csv", "csv_prices", "quotation"]
     }
+
+
+@app.post("/recommend")
+def get_recommendation(request: RecommendRequest):
+    """Get AI-powered scraping strategy recommendation from master.py"""
+    try:
+        # Check if Gemini is available
+        if not (os.getenv('GEMINI_API_KEY') or os.getenv('GEMINAI_API_KEY')):
+            raise HTTPException(
+                status_code=400,
+                detail="GEMINI_API_KEY not configured. Master recommender requires Gemini API."
+            )
+        
+        # Get recommendation
+        recommendation = recommend_scraping_strategy(
+            url=str(request.url),
+            user_intent=request.intent
+        )
+        
+        return {
+            "success": True,
+            "recommendation": recommendation.to_dict(),
+            "suggested_command": f"python run.py --url {request.url} --crawler {recommendation.crawler} --scraper {recommendation.scraper} --strictness {recommendation.strictness} --intent '{request.intent}'"
+        }
+    
+    except Exception as e:
+        print(f"Recommendation failed: {e}")
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate recommendation: {str(e)}"
+        )
 
 
 @app.post("/scrape", response_model=JobStatus)

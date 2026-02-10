@@ -3,6 +3,7 @@
 import time
 from typing import Dict, Optional
 from .config import ScraperConfig
+from .catalog_optimizer import CatalogOptimizer
 from ..utils.http_client import HTTPClient
 from ..extractors.link_extractor import LinkExtractor
 from ..extractors.product_extractor import ProductExtractor
@@ -24,15 +25,17 @@ class BalancedScraper:
     Configurable strictness: LENIENT, BALANCED, or STRICT.
     """
     
-    def __init__(self, config: ScraperConfig, strictness: str = "balanced"):
+    def __init__(self, config: ScraperConfig, strictness: str = "balanced", optimize_results: bool = True):
         """
         Initialize the scraper.
         
         Args:
             config: Scraper configuration
             strictness: Classification strictness ("lenient", "balanced", or "strict")
+            optimize_results: Enable post-processing optimization to remove duplicates and invalid entries
         """
         self.config = config
+        self.optimize_results = optimize_results
         
         # Map strictness string to enum
         strictness_map = {
@@ -73,6 +76,20 @@ class BalancedScraper:
         self.csv_storage = CSVStorage()
         self.quotation_template = QuotationTemplate()
         self.google_sheets = None  # Initialized on demand
+        
+        # Initialize optimizer
+        if optimize_results:
+            try:
+                self.optimizer = CatalogOptimizer(
+                    gemini_api_key=config.gemini_api_key,
+                    user_intent=config.user_intent
+                )
+            except Exception as e:
+                print(f"⚠️  Optimizer initialization failed: {e}")
+                self.optimize_results = False
+                self.optimizer = None
+        else:
+            self.optimizer = None
     
     def scrape_product(self, url: str) -> Optional[Dict]:
         """
@@ -253,14 +270,21 @@ class BalancedScraper:
         
         return catalog
     
-    def save_catalog(self, catalog: Dict, export_formats: list = ['json']):
+    async def save_catalog(self, catalog: Dict, export_formats: list = ['json']):
         """
-        Save catalog to file(s).
+        Save catalog to file(s) with optional optimization.
         
         Args:
             catalog: The catalog to save
             export_formats: List of formats ['json', 'csv', 'csv_prices', 'google_sheets', 'quotation']
         """
+        # Optimize catalog if enabled
+        if self.optimize_results and self.optimizer:
+            print(f"\n{'='*80}")
+            print("OPTIMIZING RESULTS")
+            print(f"{'='*80}")
+            catalog = await self.optimizer.optimize_catalog(catalog)
+        
         import os
         
         for fmt in export_formats:
